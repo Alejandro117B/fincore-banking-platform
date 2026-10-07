@@ -16,3 +16,19 @@ spring:
     locations: classpath:db/migration
     validate-on-migrate: true
     clean-disabled: true
+
+server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
+  port: ${SERVER_PORT:8080}
+  error:
+    include-message: never
+    include-stacktrace: never
+    include-exception: false
+    include-binding-errors: never
+
+springdoc:
+  api-docs:
+    enabled: ${OPENAPI_ENABLED:true}
+  swagger-ui:
+    enabled: ${SWAGGER_UI_ENABLED:true}
+  paths-to-match: /api/v1/**

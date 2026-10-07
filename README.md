@@ -1,9 +1,10 @@
 # FinCore
 
 Proyecto profesional de portafolio de backend bancario y fintech.
-La quinta etapa agrega transferencias internas seguras e idempotentes sobre
-Customer, Account y el ledger de partida doble. Conserva journals completos e
-inmutables; todavía no contiene endpoints ni casos de uso de depósito o retiro.
+La sexta etapa expone una API REST local bajo `/api/v1` para Customer, Account,
+transferencias internas seguras y consultas del ledger de partida doble.
+Conserva journals completos e inmutables. No tiene autenticación ni autorización
+y no debe exponerse públicamente hasta completar la fase de seguridad.
 
 ## Tecnologías
 
@@ -12,6 +13,7 @@ inmutables; todavía no contiene endpoints ni casos de uso de depósito o retiro
 - Spring Data JPA y Hibernate
 - PostgreSQL 18 con Docker Compose y driver JDBC
 - Flyway con módulo PostgreSQL
+- Bean Validation, Jackson 3 estricto y OpenAPI/Swagger UI (Springdoc 3.1.1)
 - Maven Wrapper 3.3.4 con Maven 3.9.11, empaquetado JAR
 
 Coordenadas: `io.github.alejandro117b:fincore:0.0.1-SNAPSHOT`.
@@ -47,11 +49,30 @@ El archivo `.env` está ignorado por Git; solo se versiona `.env.example`.
 | `POSTGRES_DB` | `fincore` | Base de datos inicial |
 | `POSTGRES_USER` | `fincore` | Usuario local |
 | `POSTGRES_PASSWORD` | Obligatoria | Contraseña local |
+| `SERVER_ADDRESS` | `127.0.0.1` | Dirección de escucha de la API, configurable para despliegues futuros |
+| `SERVER_PORT` | `8080` | Puerto de la API |
+| `OPENAPI_ENABLED` | `true` | Habilita `/v3/api-docs` |
+| `SWAGGER_UI_ENABLED` | `true` | Habilita Swagger UI; requiere OpenAPI habilitado para visualizar el contrato |
 
 FinCore se ejecuta en el host; PostgreSQL publica su puerto solo en `127.0.0.1`.
 El volumen `postgres_data` conserva los datos entre reinicios. Las variables de
 inicialización solo crean credenciales y base cuando el volumen está vacío;
 cambiarlas después no modifica los datos existentes.
+
+## API REST v1
+
+Contrato, DTOs, paquetes, errores, ejemplos y límites: [docs/api-v1.md](docs/api-v1.md).
+La API tiene ocho endpoints; no expone escritura pública de journals, ledger
+entries ni ledger accounts. El dinero se recibe y devuelve como JSON strings.
+Customer y Account no tienen idempotencia; las transferencias requieren
+`Idempotency-Key` y reproducen el resultado original con 201, body y Location.
+
+Swagger UI: `http://127.0.0.1:8080/swagger-ui.html`.
+OpenAPI: `http://127.0.0.1:8080/v3/api-docs` (el v3 corresponde a OpenAPI,
+no a una API bancaria v3). Ambas funciones se configuran mediante las variables
+anteriores. La documentación describe únicamente la superficie `/api/v1/**`.
+Es una herramienta de desarrollo; no proporciona controles de seguridad.
+La fase 6 no modifica V1–V7, no necesita V8 y conserva `ddl-auto: validate`.
 
 ## Migraciones y JPA
 
@@ -342,8 +363,8 @@ Las pruebas unitarias de Customer y Account no requieren Spring ni PostgreSQL:
 ```
 
 La suite completa requiere PostgreSQL levantado con Compose. La verificación de
-esta etapa ejecutó **267 pruebas**: las 154 existentes y 113 nuevas (32 unitarias
-de transferencias y 81 de integración/concurrencia), sin fallos, errores ni
+esta etapa ejecutó **342 pruebas**: las 267 existentes y 75 nuevas de API
+(14 de mapping/cursor, 36 MVC y 25 HTTP/PostgreSQL), sin fallos, errores ni
 omisiones, mediante `.\mvnw.cmd -B -ntp clean verify`. Incluye:
 
 - Creación válida e inválida, moneda, transiciones y timestamps deterministas.
@@ -408,6 +429,6 @@ docker compose down
 En Linux/macOS usar `./mvnw` en lugar de `.\mvnw.cmd`.
 Testcontainers y CI/CD quedan para una etapa posterior. No se incorporan campos
 balance, números de cuenta, CLABE, beneficiarios, reservas de fondos, depósitos, retiros,
-autenticación, JWT, endpoints, Kafka, Redis ni
+autenticación, JWT, Kafka, Redis ni
 microservicios. CHECKING y SAVINGS son clasificaciones: no implican intereses
 ni sobregiros. No hay conversión de divisas ni reconciliación externa.
