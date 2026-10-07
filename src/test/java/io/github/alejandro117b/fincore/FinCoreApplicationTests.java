@@ -5,6 +5,9 @@ import java.util.UUID;
 
 import io.github.alejandro117b.fincore.account.Account;
 import io.github.alejandro117b.fincore.customer.Customer;
+import io.github.alejandro117b.fincore.ledger.JournalTransaction;
+import io.github.alejandro117b.fincore.ledger.LedgerAccount;
+import io.github.alejandro117b.fincore.ledger.LedgerEntry;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.EntityManagerFactory;
 import jakarta.persistence.PersistenceContext;
@@ -49,16 +52,17 @@ class FinCoreApplicationTests {
                 .startsWith("PostgreSQL ");
         assertThat(entityManager.getMetamodel().getEntities())
                 .extracting(entity -> entity.getJavaType().getName())
-                .containsExactlyInAnyOrder(Customer.class.getName(), Account.class.getName());
+                .containsExactlyInAnyOrder(Customer.class.getName(), Account.class.getName(),
+                        LedgerAccount.class.getName(), JournalTransaction.class.getName(), LedgerEntry.class.getName());
     }
 
     @Test
-    void flywayAppliedV1ThroughV3Successfully() {
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("3");
+    void flywayAppliedV1ThroughV6Successfully() {
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("6");
         assertThat(flyway.info().pending()).isEmpty();
         assertThat(jdbcTemplate.queryForList(
                 "select version from flyway_schema_history where success = true order by installed_rank",
-                String.class)).containsExactly("1", "2", "3");
+                String.class)).containsExactly("1", "2", "3", "4", "5", "6");
         assertThat(jdbcTemplate.queryForObject(
                 "select count(*) from flyway_schema_history where version = '1' and success = true",
                 Integer.class)).isEqualTo(1);

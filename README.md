@@ -1,9 +1,9 @@
 # FinCore
 
 Proyecto profesional de portafolio de backend bancario y fintech.
-La tercera etapa introduce Customer y Account sobre PostgreSQL, JPA/Hibernate
-y migraciones Flyway. Incluye reglas básicas del dominio y persistencia real;
-todavía no contiene endpoints ni operaciones financieras.
+La cuarta etapa agrega un núcleo de ledger de partida doble sobre Customer,
+Account, PostgreSQL y JPA/Hibernate. Contabiliza journals completos e inmutables;
+todavía no contiene endpoints ni casos de uso de depósito, retiro o transferencia.
 
 ## Tecnologías
 
@@ -61,9 +61,11 @@ técnica con UUID y marcador, sin entidad de dominio ni datos iniciales.
 V2 crea `customers`; V3 crea `accounts`, su FK al titular y un índice sobre
 `customer_id`. No hay datos de ejemplo. No modificar migraciones ya aplicadas:
 los cambios futuros llevan otra versión.
+V4 crea `ledger_accounts`; V5 crea `journal_transactions`; V6 crea
+`ledger_entries`, funciones, triggers e índices del ledger.
 
 Hibernate usa `ddl-auto: validate` y `open-in-view: false`. Valida las tablas y
-columnas mapeadas de Customer y Account al inicializarse. Los CHECK, índices y
+columnas de las cinco entidades al inicializarse. Los CHECK, índices, triggers y
 reglas referenciales se definen mediante Flyway y se prueban directamente en SQL.
 La tabla técnica de V1 continúa sin entidad JPA y se comprueba mediante JDBC.
 
@@ -75,15 +77,28 @@ io.github.alejandro117b.fincore
 ├── customer
 │   ├── Customer
 │   └── CustomerRepository
-└── account
-    ├── Account
-    ├── AccountRepository
-    ├── AccountStatus
-    └── AccountType
+├── account
+│   ├── Account
+│   ├── AccountRepository
+│   ├── AccountStatus
+│   └── AccountType
+└── ledger
+    ├── LedgerAccount
+    ├── JournalTransaction
+    ├── LedgerEntry
+    ├── LedgerAccountCategory
+    ├── JournalStatus
+    ├── EntrySide
+    ├── LedgerPostingService
+    ├── LedgerBalanceService
+    ├── LedgerAccountRepository
+    ├── JournalTransactionRepository
+    ├── LedgerEntryRepository
+    └── LedgerValidation
 ```
 
-Los únicos conceptos de dominio son Customer y Account. Los enums y repositorios
-se ubican junto a su funcionalidad, sin capas adicionales ni Lombok.
+Los enums, servicios y repositorios se ubican junto a su funcionalidad,
+sin capas adicionales ni Lombok.
 
 - Customer representa una persona física. Tiene UUID, nombres obligatorios,
   email de contacto opcional, timestamps y versión. El email no es único ni una
@@ -119,6 +134,75 @@ para CLOSED. La FK usa `ON DELETE RESTRICT`: eliminar al titular con cuentas fal
 El cierre irreversible se garantiza mediante el comportamiento Java; las escrituras
 SQL directas deben respetar también las reglas del dominio.
 
+## Ledger de partida doble
+
+LedgerAccount representa exactamente una cuenta bancaria o una cuenta interna
+con `systemCode`. Las cuentas de clientes son LIABILITY; las internas pueden ser
+ASSET o LIABILITY. Su identidad, categoría y moneda son inmutables también en SQL,
+para evitar reinterpretar el historial. No existe ningún campo `balance`.
+
+JournalTransaction es la cabecera: UUID, moneda, DRAFT/POSTED, reference opcional
+y timestamps explícitos. No tiene operationType, idempotencyKey, requestHash ni
+una colección JPA de líneas. LedgerEntry relaciona la cabecera con LedgerAccount,
+un número de línea, DEBIT/CREDIT y una cantidad positiva de la misma moneda.
+Todas las relaciones son unidireccionales y lazy, sin cascadas ni orphanRemoval.
+
+`LedgerPostingService.post(journal, entries, at)` valida un snapshot de las líneas:
+al menos dos, al menos dos cuentas contables, ambos lados, cantidades positivas,
+moneda común, pertenencia al journal, números de línea únicos e igualdad de totales.
+Dentro de una transacción Spring inserta DRAFT y las líneas, hace flush, marca
+POSTED y vuelve a hacer flush. La entidad no presupone conocer líneas persistidas.
+Si existe una transacción externa, la confirmación solo ocurre al terminar esa
+transacción. Ante un rollback se deben descartar las entidades en memoria usadas
+en el intento; su estado Java no prueba que estén confirmadas.
+
+### Cantidades y saldo
+
+Se usa BigDecimal y NUMERIC(19,4), con cantidades positivas hasta
+`999999999999999.9999`. Java exige representación exacta mediante
+`RoundingMode.UNNECESSARY`: rechaza decimales significativos más allá de cuatro;
+ceros adicionales pueden eliminarse sin redondear. SQL rechaza cero, negativos y
+NaN. PostgreSQL puede redondear entradas SQL directas al convertir a NUMERIC(19,4):
+la comprobación de precisión original se realiza en la entrada Java del servicio.
+Los futuros casos de uso impondrán además la granularidad de cada moneda.
+
+`LedgerBalanceService.getBalance(ledgerAccountId)` suma solo journals POSTED:
+
+- LIABILITY: créditos menos débitos.
+- ASSET: débitos menos créditos.
+
+Una cuenta contable existente sin entradas devuelve `0.0000`; un UUID desconocido
+se rechaza. No hay saldo disponible ni proyección materializada. El ledger puede
+representar saldos negativos: partida doble no sustituye la validación de fondos.
+
+### Guards PostgreSQL (V6)
+
+| Función | Protección |
+|---|---|
+| `ledger_guard_entry_insert` | Bloquea la cabecera y solo permite insertar en DRAFT |
+| `ledger_reject_entry_mutation` | Rechaza UPDATE/DELETE de líneas, incluso durante la construcción |
+| `ledger_guard_journal_write` | Inserción DRAFT, única transición a POSTED, sin edición de metadatos ni borrado |
+| `ledger_validate_journal` | Trigger diferido: exige POSTED y comprueba el balanceo completo antes del commit |
+| `ledger_reject_account_update` | Impide alterar identidad, moneda o categoría contable |
+| `ledger_reject_truncate` | Rechaza TRUNCATE de las tres tablas del ledger |
+
+El constraint trigger `ct_journal_complete` es DEFERRABLE INITIALLY DEFERRED.
+Una transacción no puede confirmar DRAFT, ni un POSTED incompleto o desbalanceado.
+Las FKs compuestas garantizan la moneda común con el journal, LedgerAccount y Account.
+Los triggers consultan tablas calificadas con TG_TABLE_SCHEMA, para no confiar en
+el search_path del invocador. Cambios futuros requieren journals compensatorios;
+no se altera el asiento original. No se implementa todavía ese caso de uso.
+
+Estas protecciones no detienen a un administrador que pueda desactivar triggers
+o alterar el esquema. Más adelante se separarán los usuarios Flyway y runtime,
+con mínimos privilegios. Las credenciales locales actuales son privilegiadas.
+
+El bloqueo de la cabecera protege su finalización e inserción de líneas; no es un
+protocolo de validación de fondos. AccountStatus, saldo suficiente, cierre con
+saldo cero y bloqueo ordenado de Account/LedgerAccount pertenecen a futuros casos
+de uso. `@Version` de Account no protege por sí solo inserciones en el ledger.
+La idempotencia se diseñará separadamente de los registros contables.
+
 ## Verificación
 
 Las pruebas unitarias de Customer y Account no requieren Spring ni PostgreSQL:
@@ -130,8 +214,8 @@ Las pruebas unitarias de Customer y Account no requieren Spring ni PostgreSQL:
 La suite completa requiere PostgreSQL levantado con Compose. Incluye:
 
 - Creación válida e inválida, moneda, transiciones y timestamps deterministas.
-- Contexto con Hibernate en modo validate y las dos entidades reales registradas.
-- Historial V1/V2/V3 exitoso, sin migraciones pendientes, y tabla técnica de V1.
+- Contexto con Hibernate en modo validate y las cinco entidades reales registradas.
+- Historial V1–V6 exitoso, sin migraciones pendientes, y tabla técnica de V1.
 - Persistencia, flush y lectura después de limpiar el contexto, relación lazy,
   varias cuentas por cliente, enums, moneda y timestamps.
 - Restricciones SQL, FK inválida y ON DELETE RESTRICT. El rechazo de borrado en
@@ -142,13 +226,27 @@ La suite completa requiere PostgreSQL levantado con Compose. Incluye:
 Las pruebas normales hacen rollback. Las de concurrencia necesitan datos
 confirmados y eliminan únicamente sus fixtures identificados por UUID al terminar.
 
+Las pruebas unitarias del ledger comprueban las invariantes y el orden de
+contabilización. `LedgerIntegrationTests` usa un esquema generado por ejecución
+en el PostgreSQL de Compose, con las mismas migraciones V1–V6. TransactionTemplate
+realiza commits tanto válidos como inválidos para probar los triggers diferidos.
+El esquema aislado se elimina administrativamente al terminar, sin desactivar
+guards ni modificar public. Las pruebas necesitan permiso para crear ese esquema.
+
+Se comprueban rollback completo, ataques SQL de edición/borrado/truncado, inserción
+posterior a POSTED, monedas, relaciones lazy, cuentas internas y cálculo de saldos.
+La transferencia conceptual de 500 MXN utiliza líneas contables de prueba:
+el saldo origen baja de 1000 a 500 y el destino sube de 0 a 500, conservando 1000.
+No existe un servicio de transferencias ni una operación de depósito para crear
+esos fixtures.
+
 Para consultar el historial en PowerShell sin mostrar la contraseña:
 
 ```powershell
 'SELECT installed_rank, version, script, success, installed_on FROM flyway_schema_history ORDER BY installed_rank;' | docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
-Al reiniciar FinCore, Flyway debe indicar que el esquema está actualizado; V1/V2/V3
+Al reiniciar FinCore, Flyway debe indicar que el esquema está actualizado; V1–V6
 conservan una sola entrada y el mismo `installed_on`. Detener FinCore con Ctrl+C.
 El JAR ejecutable queda en `target/fincore-0.0.1-SNAPSHOT.jar`.
 
@@ -160,8 +258,8 @@ docker compose down
 ```
 
 En Linux/macOS usar `./mvnw` en lugar de `.\mvnw.cmd`.
-Testcontainers y CI/CD quedan para una etapa posterior. No se incorporan balances,
-números de cuenta, CLABE, beneficiarios, transferencias, movimientos, autenticación,
-seguridad, JWT, endpoints ni ledger. CHECKING y SAVINGS son clasificaciones: no
-implican intereses ni sobregiros. Las condiciones financieras para cerrar cuentas
-se definirán cuando exista el modelo de movimientos y saldos.
+Testcontainers y CI/CD quedan para una etapa posterior. No se incorporan campos
+balance, números de cuenta, CLABE, beneficiarios, reservas, depósitos, retiros,
+casos de uso de transferencias, autenticación, JWT, endpoints, Kafka, Redis ni
+microservicios. CHECKING y SAVINGS son clasificaciones: no implican intereses
+ni sobregiros. No hay divisas, reconciliación externa ni idempotencia de solicitudes.
