@@ -3,6 +3,8 @@ package io.github.alejandro117b.fincore;
 import java.util.Map;
 import java.util.UUID;
 
+import io.github.alejandro117b.fincore.account.Account;
+import io.github.alejandro117b.fincore.customer.Customer;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.EntityManagerFactory;
 import jakarta.persistence.PersistenceContext;
@@ -45,14 +47,18 @@ class FinCoreApplicationTests {
         assertThat(entityManager.isOpen()).isTrue();
         assertThat(entityManager.createNativeQuery("select version()").getSingleResult().toString())
                 .startsWith("PostgreSQL ");
-        // Column validation of mapped entities comes with the first real model.
-        assertThat(entityManager.getMetamodel().getEntities()).isEmpty();
+        assertThat(entityManager.getMetamodel().getEntities())
+                .extracting(entity -> entity.getJavaType().getName())
+                .containsExactlyInAnyOrder(Customer.class.getName(), Account.class.getName());
     }
 
     @Test
-    void flywayAppliedV1Successfully() {
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("1");
+    void flywayAppliedV1ThroughV3Successfully() {
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("3");
         assertThat(flyway.info().pending()).isEmpty();
+        assertThat(jdbcTemplate.queryForList(
+                "select version from flyway_schema_history where success = true order by installed_rank",
+                String.class)).containsExactly("1", "2", "3");
         assertThat(jdbcTemplate.queryForObject(
                 "select count(*) from flyway_schema_history where version = '1' and success = true",
                 Integer.class)).isEqualTo(1);
