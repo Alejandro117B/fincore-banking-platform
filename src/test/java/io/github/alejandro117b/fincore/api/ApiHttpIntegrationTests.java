@@ -39,7 +39,8 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 import static org.assertj.core.api.Assertions.*;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = "fincore.demo.seed.enabled=false")
+@org.springframework.test.context.ActiveProfiles("dev")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @ExtendWith(OutputCaptureExtension.class)
@@ -66,9 +67,41 @@ class ApiHttpIntegrationTests {
     @Autowired private LedgerAccountRepository ledgerAccounts;
     @Autowired private AccountRepository accounts;
     @Autowired private Flyway flyway;
+    @Autowired private io.github.alejandro117b.fincore.auth.AuthUserProvisioningService provisioning;
+    @Autowired private io.github.alejandro117b.fincore.auth.AuthUserRepository identities;
+    @Autowired private io.github.alejandro117b.fincore.auth.JwtTokenService tokens;
+    @Autowired private io.github.alejandro117b.fincore.customer.CustomerService customerService;
+    private UUID fixtureCustomer;
+    private final java.util.Map<UUID, String> actorTokens = new java.util.concurrent.ConcurrentHashMap<>();
     @PersistenceContext private EntityManager em;
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3))
             .version(HttpClient.Version.HTTP_1_1).build();
+
+    @BeforeAll
+    void provisionAuthenticatedHttpFixture() {
+        fixtureCustomer = customerService.create("HTTP", "Fixture", null).id();
+    }
+
+    private String actorToken(String path) {
+        UUID owner = fixtureCustomer;
+        String resource = path.split("\\?")[0];
+        try {
+            if (resource.startsWith("/api/v1/accounts/")) {
+                UUID id = UUID.fromString(resource.split("/")[4]);
+                var found = jdbc.queryForList("SELECT customer_id FROM accounts WHERE id = ?", UUID.class, id);
+                if (!found.isEmpty()) { owner = found.getFirst(); }
+            } else if (resource.startsWith("/api/v1/customers/")) {
+                UUID id = UUID.fromString(resource.split("/")[4]);
+                if (jdbc.queryForObject("SELECT count(*) FROM customers WHERE id = ?", Integer.class, id) == 1) { owner = id; }
+            }
+        } catch (IllegalArgumentException ignored) { /* Invalid path tests still use a valid authenticated actor. */ }
+        return actorTokens.computeIfAbsent(owner, customer -> {
+            UUID id = provisioning.provision(customer + "@http.example.test", "http-fixture-password", customer,
+                    java.util.Set.of(io.github.alejandro117b.fincore.auth.AuthRole.USER,
+                            io.github.alejandro117b.fincore.auth.AuthRole.ADMIN));
+            return tokens.issue(identities.findById(id).orElseThrow());
+        });
+    }
 
     private TransactionTemplate tx() {
         TransactionTemplate tx = new TransactionTemplate(manager);
@@ -78,7 +111,8 @@ class ApiHttpIntegrationTests {
 
     private HttpResponse<String> request(String method, String path, String body, String... headers) throws Exception {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
-                .timeout(Duration.ofSeconds(20)).header("Accept", "application/json");
+                .timeout(Duration.ofSeconds(20)).header("Accept", "application/json")
+                .header("Authorization", "Bearer " + actorToken(path));
         if (body != null) { builder.header("Content-Type", "application/json"); }
         for (int index = 0; index < headers.length; index += 2) { builder.header(headers[index], headers[index + 1]); }
         return client.send(builder.method(method, body == null ? HttpRequest.BodyPublishers.noBody()
@@ -501,7 +535,11 @@ class ApiHttpIntegrationTests {
         assertThat(response.statusCode()).isEqualTo(200);
         JsonNode doc = body(response);
         java.nio.file.Files.writeString(java.nio.file.Path.of("target", "api-openapi.json"), response.body());
-        assertThat(doc.path("paths").size()).isEqualTo(8);
+        assertThat(doc.path("paths").size()).isEqualTo(10);
+        assertThat(doc.path("components").path("securitySchemes").path("bearerJwt").path("scheme").asString()).isEqualTo("bearer");
+        assertThat(doc.path("paths").path("/api/v1/auth/login").path("post").path("security").isEmpty()).isTrue();
+        assertThat(doc.path("paths").path("/api/v1/accounts/{id}").path("get").path("security").get(0).has("bearerJwt")).isTrue();
+        assertThat(doc.path("paths").path("/api/v1/accounts").path("post").path("responses").has("403")).isTrue();
         assertThat(doc.path("paths").has("/api/v1/accounts/{id}/transactions")).isTrue();
         assertThat(doc.path("paths").has("/api/v1/ledger-entry")).isFalse();
         JsonNode schemas = doc.path("components").path("schemas");
@@ -526,7 +564,7 @@ class ApiHttpIntegrationTests {
                 HttpResponse.BodyHandlers.ofString());
         assertThat(ui.statusCode()).isEqualTo(200);
         assertThat(ui.body()).contains("Swagger UI");
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("7");
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("8");
         assertThat(flyway.info().pending()).isEmpty();
     }
 

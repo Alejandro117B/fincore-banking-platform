@@ -808,11 +808,11 @@ class TransferIntegrationTests {
 
     @Test
     void flywayAndHibernateValidateTheRealTransferSchema() {
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("7");
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("8");
         assertThat(flyway.info().pending()).isEmpty();
         assertThat(em.getEntityManagerFactory().getProperties()).containsEntry("hibernate.hbm2ddl.auto", "validate");
         assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history WHERE success AND version IS NOT NULL ORDER BY installed_rank", String.class))
-                .containsExactly("1", "2", "3", "4", "5", "6", "7");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8");
         assertThat(jdbc.queryForObject("SELECT count(*) FROM transfer_idempotency_records WHERE status = 'RESERVED'", Integer.class)).isZero();
     }
 

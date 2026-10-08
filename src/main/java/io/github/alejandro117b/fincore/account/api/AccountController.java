@@ -4,6 +4,7 @@ import java.net.URI;
 import io.github.alejandro117b.fincore.account.AccountService;
 import io.github.alejandro117b.fincore.account.AccountStatementQueryService;
 import io.github.alejandro117b.fincore.api.ApiInputs;
+import io.github.alejandro117b.fincore.security.ResourceAccessPolicy;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -22,10 +23,13 @@ import org.springframework.web.bind.annotation.*;
 public class AccountController {
     private final AccountService service;
     private final AccountStatementQueryService statements;
+    private final ResourceAccessPolicy access;
 
-    public AccountController(AccountService service, AccountStatementQueryService statements) {
+    public AccountController(AccountService service, AccountStatementQueryService statements,
+                             ResourceAccessPolicy access) {
         this.service = service;
         this.statements = statements;
+        this.access = access;
     }
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -38,11 +42,19 @@ public class AccountController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Get an account")
-    public AccountResponse get(@PathVariable String id) { return service.get(ApiInputs.uuid(id)); }
+    public AccountResponse get(@PathVariable String id) {
+        var accountId = ApiInputs.uuid(id);
+        access.requireOwnAccount(accountId);
+        return service.get(accountId);
+    }
 
     @GetMapping("/{id}/balance")
     @Operation(summary = "Get posted balance", description = "Ledger is the source of truth. POSTED only; not available balance. Existing account without a ledger account returns 409 ACCOUNT_NOT_READY.")
-    public AccountBalanceResponse balance(@PathVariable String id) { return service.balance(ApiInputs.uuid(id)); }
+    public AccountBalanceResponse balance(@PathVariable String id) {
+        var accountId = ApiInputs.uuid(id);
+        access.requireOwnAccount(accountId);
+        return service.balance(accountId);
+    }
 
     @GetMapping("/{id}/transactions")
     @Operation(summary = "Get account journal participation", description = "One aggregated row per POSTED journal. Keyset ordered by postedAt DESC, journalTransactionId DESC. Cursor is versioned and account-bound; not a frozen snapshot between pages. No OFFSET or total count.")
@@ -51,6 +63,8 @@ public class AccountController {
             @RequestParam(defaultValue = "20") String limit,
             @Parameter(description = "Opaque nextCursor from the previous page for this account.")
             @RequestParam(required = false) String cursor) {
-        return statements.get(ApiInputs.uuid(id), limit, cursor);
+        var accountId = ApiInputs.uuid(id);
+        access.requireOwnAccount(accountId);
+        return statements.get(accountId, limit, cursor);
     }
 }

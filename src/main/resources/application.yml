@@ -28,7 +28,15 @@ server:
 
 springdoc:
   api-docs:
-    enabled: ${OPENAPI_ENABLED:true}
+    enabled: ${OPENAPI_ENABLED:false}
   swagger-ui:
-    enabled: ${SWAGGER_UI_ENABLED:true}
+    enabled: ${SWAGGER_UI_ENABLED:false}
   paths-to-match: /api/v1/**
+
+fincore:
+  security:
+    jwt:
+      private-key: ${FINCORE_JWT_PRIVATE_KEY:}
+      public-key: ${FINCORE_JWT_PUBLIC_KEY:}
+      issuer: fincore
+      audience: fincore-api

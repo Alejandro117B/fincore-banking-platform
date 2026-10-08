@@ -22,6 +22,7 @@ class DemoSeedConfigurationTests {
     private final LedgerPostingService posting = mock(LedgerPostingService.class);
     private final ApplicationContextRunner context = new ApplicationContextRunner()
             .withUserConfiguration(DemoSeedConfiguration.class)
+            .withBean(DemoUsersSeeder.class, () -> mock(DemoUsersSeeder.class))
             .withBean(PlatformTransactionManager.class, () -> mock(PlatformTransactionManager.class))
             .withBean(JdbcTemplate.class, () -> mock(JdbcTemplate.class))
             .withBean(EntityManager.class, () -> mock(EntityManager.class))

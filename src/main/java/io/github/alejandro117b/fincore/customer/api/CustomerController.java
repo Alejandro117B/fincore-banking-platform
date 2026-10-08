@@ -3,6 +3,7 @@ package io.github.alejandro117b.fincore.customer.api;
 import java.net.URI;
 import io.github.alejandro117b.fincore.api.ApiInputs;
 import io.github.alejandro117b.fincore.customer.CustomerService;
+import io.github.alejandro117b.fincore.security.ResourceAccessPolicy;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -19,8 +20,12 @@ import org.springframework.web.bind.annotation.*;
                 implementation = io.github.alejandro117b.fincore.api.ApiError.class)))
 public class CustomerController {
     private final CustomerService service;
+    private final ResourceAccessPolicy access;
 
-    public CustomerController(CustomerService service) { this.service = service; }
+    public CustomerController(CustomerService service, ResourceAccessPolicy access) {
+        this.service = service;
+        this.access = access;
+    }
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     @ResponseStatus(HttpStatus.CREATED)
@@ -32,5 +37,9 @@ public class CustomerController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Get a customer")
-    public CustomerResponse get(@PathVariable String id) { return service.get(ApiInputs.uuid(id)); }
+    public CustomerResponse get(@PathVariable String id) {
+        var customerId = ApiInputs.uuid(id);
+        access.requireOwnCustomer(customerId);
+        return service.get(customerId);
+    }
 }

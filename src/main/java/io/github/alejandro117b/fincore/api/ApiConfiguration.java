@@ -9,6 +9,8 @@ import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.media.StringSchema;
 import io.swagger.v3.oas.models.responses.ApiResponse;
+import io.swagger.v3.oas.models.security.SecurityScheme;
+import io.swagger.v3.oas.models.security.SecurityRequirement;
 import org.springdoc.core.customizers.OpenApiCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -18,13 +20,25 @@ public class ApiConfiguration {
     @Bean
     OpenAPI finCoreApi() {
         Components components = new Components();
+        components.addSecuritySchemes("bearerJwt", new SecurityScheme()
+                .type(SecurityScheme.Type.HTTP).scheme("bearer").bearerFormat("JWT"));
         return new OpenAPI().components(components).info(new Info().title("FinCore development API").version("v1")
-                .description("Local development interface. No authentication or ownership authorization: not safe for public exposure. Money uses JSON strings, never numeric tokens. Customer/Account creation is not idempotent."));
+                .description("JWT authenticated API. Customer/Account reads enforce ownership; creation requires ADMIN. "
+                        + "Transfers currently require authentication only; ownership and identity-scoped idempotency are pending Phase 7B. "
+                        + "Money uses JSON strings. Customer/Account creation is not idempotent."));
     }
 
     @Bean
     OpenApiCustomizer publicErrorContracts() {
         return api -> api.getPaths().forEach((path, item) -> item.readOperationsMap().forEach((method, operation) -> {
+            boolean login = path.equals("/api/v1/auth/login");
+            operation.setSecurity(login ? java.util.List.of() : java.util.List.of(
+                    new SecurityRequirement().addList("bearerJwt")));
+            addError(operation.getResponses(), "401", login ? "Invalid credentials." : "Missing, invalid, expired or revoked token.");
+            if (!login) { addError(operation.getResponses(), "403", "The identity lacks the required role or route permission."); }
+            if (path.startsWith("/api/v1/transfers")) {
+                operation.setDescription(operation.getDescription() + " Phase 7A: authenticated access only; ownership and identity-scoped idempotency are pending Phase 7B.");
+            }
             addError(operation.getResponses(), "400", "Invalid request, JSON, UUID, header or pagination.");
             addError(operation.getResponses(), "500", "Unexpected technical failure; safe diagnostic only.");
             addError(operation.getResponses(), "503", "Temporary technical failure; retry with the same transfer key.");

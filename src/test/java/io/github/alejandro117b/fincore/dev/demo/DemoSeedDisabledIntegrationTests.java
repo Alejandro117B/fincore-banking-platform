@@ -50,6 +50,8 @@ class DemoSeedDisabledIntegrationTests {
         assertThat(jdbc.queryForObject("SELECT count(*) FROM accounts", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT count(*) FROM journal_transactions", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT count(*) FROM ledger_entries", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM auth_users", Integer.class)).isZero();
+        assertThat(context.getBeansOfType(DemoUsersSeeder.class)).isEmpty();
     }
 
     @AfterAll

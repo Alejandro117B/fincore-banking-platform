@@ -84,16 +84,17 @@ class FinCoreApplicationTests {
                 .extracting(entity -> entity.getJavaType().getName())
                 .containsExactlyInAnyOrder(Customer.class.getName(), Account.class.getName(),
                         LedgerAccount.class.getName(), JournalTransaction.class.getName(), LedgerEntry.class.getName(),
-                        Transfer.class.getName(), TransferIdempotencyRecord.class.getName());
+                        Transfer.class.getName(), TransferIdempotencyRecord.class.getName(),
+                        io.github.alejandro117b.fincore.auth.AuthUser.class.getName());
     }
 
     @Test
-    void flywayAppliedV1ThroughV7Successfully() {
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("7");
+    void flywayAppliedV1ThroughV8Successfully() {
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("8");
         assertThat(flyway.info().pending()).isEmpty();
         assertThat(jdbcTemplate.queryForList(
                 "select version from flyway_schema_history where success = true order by installed_rank",
-                String.class)).containsExactly("1", "2", "3", "4", "5", "6", "7");
+                String.class)).containsExactly("1", "2", "3", "4", "5", "6", "7", "8");
         assertThat(jdbcTemplate.queryForObject(
                 "select count(*) from flyway_schema_history where version = '1' and success = true",
                 Integer.class)).isEqualTo(1);

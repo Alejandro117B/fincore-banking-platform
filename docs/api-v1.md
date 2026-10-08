@@ -1,13 +1,16 @@
-# FinCore API v1 — fase 6
+# FinCore API v1 — fases 6 y 7A
 
-Interfaz de desarrollo local, sin autenticación ni autorización por propietario.
-No es segura para exposición pública. El dominio y Flyway V1–V7 permanecen
-intactos; no se agrega V8 ni un balance mutable.
+Fase 7A añade login JWT, ownership para lecturas de Customer/Account y creación
+administrativa. Transferencias exige autenticación, pero ownership e idempotencia
+por identidad quedan pendientes de 7B. V1–V7 y el ledger permanecen intactos;
+V8 crea identidad/roles, sin balances mutables. Ver [security-7a.md](security-7a.md).
 
 ## Endpoints y DTOs
 
 | Método | Ruta | Request | Response | Éxito |
 |---|---|---|---|---|
+| POST | /api/v1/auth/login | LoginRequest | LoginResponse | 200 |
+| GET | /api/v1/auth/me | Bearer JWT | IdentityResponse | 200 |
 | POST | /api/v1/customers | CreateCustomerRequest | CustomerResponse | 201 + Location |
 | GET | /api/v1/customers/{id} | UUID en ruta | CustomerResponse | 200 |
 | POST | /api/v1/accounts | CreateAccountRequest | AccountResponse | 201 + Location |
@@ -230,7 +233,8 @@ y requests reales a OpenAPI y Swagger UI.
 OpenAPI se obtiene en /v3/api-docs; Swagger UI en /swagger-ui.html.
 El v3 del documento no es una versión de los recursos bancarios. La documentación
 incluye solo /api/v1/**, los DTOs, ApiError, importes como strings, headers,
-201 original/replay, Location, nullable y ejemplos. No define autenticación ficticia.
+201 original/replay, Location, nullable y ejemplos. Incluye Bearer JWT y
+401/403; login se declara público. Las rutas de documentación se permiten solo en dev.
 
 Dependencias nuevas:
 
@@ -290,8 +294,8 @@ en target/api-openapi.json. El JAR también arrancó con SERVER_ADDRESS=127.0.0.
 SERVER_PORT=0 y OPENAPI_ENABLED/SWAGGER_UI_ENABLED=false: documentación y UI
 devolvieron 404; PostgreSQL/Flyway V7 e Hibernate inicializaron correctamente.
 
-Quedan pendientes seguridad, autorización, alcance de keys por identidad,
+Quedan pendientes ownership de transferencias y alcance de keys por identidad,
 idempotencia para creación Customer/Account, snapshots históricos estrictos,
 rendimiento a escala, separación de usuarios Flyway/runtime y CI/Testcontainers.
 No se implementan depósitos, retiros, balance materializado, Kafka, Redis,
-microservicios, JWT ni endpoints de administración contable.
+microservicios, refresh tokens ni endpoints de administración contable.

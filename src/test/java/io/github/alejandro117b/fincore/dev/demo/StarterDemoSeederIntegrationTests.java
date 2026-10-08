@@ -70,6 +70,10 @@ class StarterDemoSeederIntegrationTests {
     }
 
     @Autowired private StarterDemoSeeder seeder;
+    @Autowired private DemoUsersSeeder demoUsers;
+    @Autowired private io.github.alejandro117b.fincore.auth.AuthUserRepository authUsers;
+    @Autowired private io.github.alejandro117b.fincore.auth.AuthUserProvisioningService provisioning;
+    @Autowired private org.springframework.security.crypto.password.PasswordEncoder passwords;
     @Autowired @Qualifier("demoSeedRunner") private ApplicationRunner runner;
     @Autowired private CustomerRepository customers;
     @Autowired private AccountRepository accounts;
@@ -103,9 +107,81 @@ class StarterDemoSeederIntegrationTests {
                 .containsExactlyInAnyOrder("classpath:db/migration", "classpath:db/dev-migration");
         assertThat(flyway.info().pending()).isEmpty();
         assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history WHERE version IS NOT NULL ORDER BY installed_rank",
-                String.class)).containsExactly("1", "2", "3", "4", "5", "6", "7");
+                String.class)).containsExactly("1", "2", "3", "4", "5", "6", "7", "8");
         assertThat(jdbc.queryForObject("SELECT count(*) FROM flyway_schema_history WHERE script = 'R__create_demo_seed_runs.sql' AND success",
                 Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void demoUsersUsePersistedCustomerIdsAndAreIdempotentWithoutChangingFinancialDefinition() {
+        var ids = seeder.seed();
+        String definition = jdbc.queryForObject("SELECT definition_hash FROM demo_seed_runs", String.class);
+        var users = demoUsers.seed(ids);
+        var alejandro = authUsers.findById(users.alejandroUserId()).orElseThrow();
+        var fernando = authUsers.findById(users.fernandoUserId()).orElseThrow();
+        assertThat(alejandro.getCustomerId()).isEqualTo(ids.alejandroCustomerId());
+        assertThat(fernando.getCustomerId()).isEqualTo(ids.fernandoCustomerId());
+        assertThat(alejandro.getRoles()).containsExactly(io.github.alejandro117b.fincore.auth.AuthRole.USER);
+        assertThat(fernando.getRoles()).containsExactly(io.github.alejandro117b.fincore.auth.AuthRole.USER);
+        assertThat(passwords.matches("test-Alejandro-credential", alejandro.getPasswordHash())).isTrue();
+        assertThat(passwords.matches("test-Fernando-credential", fernando.getPasswordHash())).isTrue();
+        assertThat(demoUsers.seed(ids)).isEqualTo(users);
+        assertThat(count("auth_users")).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT definition_hash FROM demo_seed_runs", String.class)).isEqualTo(definition);
+        assertThat(count("customers")).isEqualTo(2);
+        assertThat(count("accounts")).isEqualTo(2);
+        assertThat(count("journal_transactions")).isEqualTo(1);
+        assertThat(count("ledger_entries")).isEqualTo(2);
+    }
+
+    @Test
+    void demoRunnerRestartAfterSpendingDoesNotResetPasswordsOrReplenishFunds() throws Exception {
+        runner.run(new org.springframework.boot.DefaultApplicationArguments());
+        var ids = seeder.seed();
+        var users = demoUsers.seed(ids);
+        String hash = authUsers.findById(users.alejandroUserId()).orElseThrow().getPasswordHash();
+        transfers.execute(new TransferCommand(ids.alejandroAccountId(), ids.fernandoAccountId(),
+                new BigDecimal("500.0000"), "MXN", "auth-demo-spend", null));
+        runner.run(new org.springframework.boot.DefaultApplicationArguments());
+        assertThat(demoUsers.seed(ids)).isEqualTo(users);
+        assertThat(authUsers.findById(users.alejandroUserId()).orElseThrow().getPasswordHash()).isEqualTo(hash);
+        assertThat(balances.getBalance(ledgers.findByAccountId(ids.alejandroAccountId()).orElseThrow().getId())).isEqualByComparingTo("1500.0000");
+        assertThat(balances.getBalance(ledgers.findByAccountId(ids.fernandoAccountId()).orElseThrow().getId())).isEqualByComparingTo("500.0000");
+        assertThat(count("auth_users")).isEqualTo(2);
+        assertThat(count("journal_transactions")).isEqualTo(2);
+    }
+
+    @Test
+    void twoConcurrentDemoIdentityRunsCreateOnlyOnePair() throws Exception {
+        var ids = seeder.seed();
+        var executor = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var first = executor.submit(() -> demoUsers.seed(ids));
+            var second = executor.submit(() -> demoUsers.seed(ids));
+            assertThat(first.get(10, java.util.concurrent.TimeUnit.SECONDS)).isEqualTo(second.get(10, java.util.concurrent.TimeUnit.SECONDS));
+            assertThat(count("auth_users")).isEqualTo(2);
+            assertThat(count("auth_user_roles")).isEqualTo(2);
+        } finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void missingSecondDemoCredentialRollsBackBothIdentitiesAndCanBeRetried() {
+        var ids = seeder.seed();
+        var environment = new org.springframework.mock.env.MockEnvironment()
+                .withProperty("fincore.demo.seed.alejandro-email", "alejandro.demo@example.test")
+                .withProperty("fincore.demo.seed.fernando-email", "fernando.demo@example.test")
+                .withProperty("fincore.demo.seed.alejandro-password", "test-Alejandro-credential")
+                .withProperty("fincore.demo.seed.fernando-password", "");
+        var failing = new DemoUsersSeeder(manager, jdbc, authUsers, provisioning, environment);
+        assertThatThrownBy(() -> failing.seed(ids)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(count("auth_users")).isZero();
+        assertThat(count("auth_user_roles")).isZero();
+        demoUsers.seed(ids);
+        assertThat(count("auth_users")).isEqualTo(2);
+        assertThat(count("journal_transactions")).isEqualTo(1);
     }
 
     @Test

@@ -1,6 +1,5 @@
 package io.github.alejandro117b.fincore.api;
 
-import java.time.Clock;
 import java.util.Comparator;
 import java.util.List;
 import io.github.alejandro117b.fincore.transfer.TransferException;
@@ -12,7 +11,6 @@ import org.springframework.dao.TransientDataAccessException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.transaction.CannotCreateTransactionException;
@@ -21,15 +19,30 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.ServletWebRequest;
 import org.springframework.web.context.request.WebRequest;
-import org.springframework.web.servlet.HandlerMapping;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 @RestControllerAdvice
 public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     private static final Logger LOG = LoggerFactory.getLogger(ApiExceptionHandler.class);
-    private final Clock clock;
+    private final ApiErrorResponses errors;
 
-    public ApiExceptionHandler(Clock clock) { this.clock = clock; }
+    public ApiExceptionHandler(ApiErrorResponses errors) { this.errors = errors; }
+
+    @ExceptionHandler(AuthenticationException.class)
+    ResponseEntity<Object> authentication(AuthenticationException exception, HttpServletRequest request) {
+        HttpHeaders headers = new HttpHeaders();
+        boolean missing = exception instanceof org.springframework.security.authentication.AuthenticationCredentialsNotFoundException;
+        if (missing) { headers.set(HttpHeaders.WWW_AUTHENTICATE, "Bearer"); }
+        return response(HttpStatus.UNAUTHORIZED, missing ? "AUTHENTICATION_REQUIRED" : "INVALID_CREDENTIALS",
+                missing ? "Authentication is required." : "Credentials are invalid.", List.of(), request, headers);
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    ResponseEntity<Object> forbidden(AccessDeniedException exception, HttpServletRequest request) {
+        return response(HttpStatus.FORBIDDEN, "FORBIDDEN", "Access is forbidden.", List.of(), request, new HttpHeaders());
+    }
 
     @ExceptionHandler(ApiException.class)
     ResponseEntity<Object> controlled(ApiException exception, HttpServletRequest request) {
@@ -108,16 +121,6 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     private ResponseEntity<Object> response(HttpStatusCode status, String code, String message,
                                            List<ApiValidationError> details, HttpServletRequest request, HttpHeaders original) {
-        HttpHeaders headers = new HttpHeaders();
-        headers.putAll(original);
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.set("X-Request-Id", RequestIdFilter.id(request));
-        headers.setCacheControl("no-store");
-        Object route = request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE);
-        // Return the route template, never query strings or invalid user-supplied path values.
-        String path = route == null ? "/api/v1" : route.toString();
-        ApiError error = new ApiError(clock.instant(), status.value(), code, message, path,
-                RequestIdFilter.id(request), details);
-        return new ResponseEntity<>(error, headers, status);
+        return errors.response(status, code, message, details, request, original);
     }
 }

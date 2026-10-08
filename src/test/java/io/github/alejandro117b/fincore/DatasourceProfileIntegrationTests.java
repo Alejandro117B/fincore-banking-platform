@@ -89,7 +89,7 @@ class DatasourceProfileIntegrationTests {
                         assertThat(normal.getBean(Flyway.class).info().pending()).isEmpty();
                         assertThat(jdbc(normal).queryForList("SELECT script FROM flyway_schema_history "
                                 + "WHERE version IS NOT NULL ORDER BY installed_rank", String.class))
-                                .hasSize(7).noneMatch(script -> script.contains("demo"));
+                                .hasSize(8).noneMatch(script -> script.contains("demo"));
                         assertThat(snapshot(dev)).isEqualTo(before);
                     } finally {
                         dropOnlyTheGeneratedSchema(normal, schema);
@@ -111,6 +111,11 @@ class DatasourceProfileIntegrationTests {
                 "--spring.jpa.properties.hibernate.default_schema=" + schema,
                 "--spring.datasource.hikari.connection-init-sql=SET search_path TO " + schema,
                 "--spring.datasource.hikari.read-only=" + readOnly));
+        if (readOnly) {
+            // Changing supplied demo credentials on restart must never reset persisted hashes.
+            arguments.add("--fincore.demo.seed.alejandro-password=changed-test-password");
+            arguments.add("--fincore.demo.seed.fernando-password=changed-test-password");
+        }
         if (seed) {
             arguments.add("--fincore.demo.seed.enabled=true");
         }
@@ -144,10 +149,11 @@ class DatasourceProfileIntegrationTests {
     private static Map<String, String> snapshot(ConfigurableApplicationContext context) {
         Map<String, String> result = new LinkedHashMap<>();
         for (String table : List.of("customers", "accounts", "ledger_accounts", "journal_transactions",
-                "ledger_entries", "transfers", "transfer_idempotency_records")) {
+                "ledger_entries", "transfers", "transfer_idempotency_records", "auth_users")) {
             result.put(table, jdbc(context).queryForObject("SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id), '[]')::text FROM "
                     + table + " t", String.class));
         }
+        result.put("auth_user_roles", jdbc(context).queryForObject("SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY auth_user_id, role), '[]')::text FROM auth_user_roles t", String.class));
         result.put("demo_seed_runs", jdbc(context).queryForObject("SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY scenario_key), '[]')::text "
                 + "FROM demo_seed_runs t", String.class));
         result.put("flyway_schema_history", jdbc(context).queryForObject("SELECT jsonb_agg(to_jsonb(t) ORDER BY installed_rank)::text "

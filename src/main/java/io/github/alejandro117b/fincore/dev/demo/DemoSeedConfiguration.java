@@ -31,10 +31,13 @@ public class DemoSeedConfiguration {
     }
 
     @Bean
-    ApplicationRunner demoSeedRunner(StarterDemoSeeder seeder) {
+    ApplicationRunner demoSeedRunner(StarterDemoSeeder seeder, DemoUsersSeeder users) {
         return arguments -> {
             // seed() returns only after commit, including deferred ledger checks.
             var result = seeder.seed();
+            var identities = users.seed(result);
+            LOG.info("Demo USER identities ready: Alejandro ID={}, Fernando ID={}",
+                    identities.alejandroUserId(), identities.fernandoUserId());
             LOG.info("Demo scenario {} ready. Alejandro Demo: Customer ID={}, Account ID={}, "
                             + "expected initial balance=2000.0000 MXN. Fernando Demo: Customer ID={}, Account ID={}. "
                             + "Funding Journal ID={}. Existing funds are never replenished.",

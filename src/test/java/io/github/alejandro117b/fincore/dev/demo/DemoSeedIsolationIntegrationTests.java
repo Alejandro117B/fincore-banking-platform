@@ -46,9 +46,11 @@ class DemoSeedIsolationIntegrationTests {
                 .containsExactly("classpath:db/migration");
         assertThat(jdbc.queryForObject("SELECT to_regclass('demo_seed_runs')", String.class)).isNull();
         assertThat(jdbc.queryForList("SELECT script FROM flyway_schema_history WHERE version IS NOT NULL ORDER BY installed_rank", String.class))
-                .hasSize(7).noneMatch(script -> script.contains("demo"));
+                .hasSize(8).noneMatch(script -> script.contains("demo"));
         assertThat(jdbc.queryForObject("SELECT count(*) FROM customers", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT count(*) FROM ledger_entries", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM auth_users", Integer.class)).isZero();
+        assertThat(context.getBeansOfType(DemoUsersSeeder.class)).isEmpty();
     }
 
     @AfterAll

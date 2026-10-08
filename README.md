@@ -1,15 +1,17 @@
 # FinCore
 
 Proyecto profesional de portafolio de backend bancario y fintech.
-La sexta etapa expone una API REST local bajo `/api/v1` para Customer, Account,
-transferencias internas seguras y consultas del ledger de partida doble.
-Conserva journals completos e inmutables. No tiene autenticación ni autorización
-y no debe exponerse públicamente hasta completar la fase de seguridad.
+La Fase 7A incorpora identidad, login JWT y autorización de lecturas y creación
+administrativa en la API `/api/v1`. Conserva journals completos e inmutables.
+Ownership e idempotencia de transferencias quedan pendientes de 7B: no exponer
+la aplicación a usuarios no confiables hasta completar esa fase.
+Configuración de claves, permisos y primer ADMIN: [docs/security-7a.md](docs/security-7a.md).
 
 ## Tecnologías
 
 - Java 21 y Spring Boot 4.1.1
 - Spring Web MVC y Spring Boot Test
+- Spring Security 7.1.1, JWT RS256 y Argon2id con Password4j
 - Spring Data JPA y Hibernate
 - PostgreSQL 18 con Docker Compose y driver JDBC
 - Flyway con módulo PostgreSQL
@@ -30,6 +32,7 @@ Desde la raíz del repositorio en PowerShell:
 ```powershell
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # Editar .env y reemplazar POSTGRES_PASSWORD antes de continuar.
+# Configurar FINCORE_JWT_PRIVATE_KEY y FINCORE_JWT_PUBLIC_KEY con URI file: externas.
 docker compose config --quiet
 docker compose up -d --wait postgres
 docker compose ps
@@ -87,17 +90,18 @@ conservando las variables de conexión de host, puerto, usuario y contraseña.
 ## API REST v1
 
 Contrato, DTOs, paquetes, errores, ejemplos y límites: [docs/api-v1.md](docs/api-v1.md).
-La API tiene ocho endpoints; no expone escritura pública de journals, ledger
+La API tiene diez endpoints, incluidos login y auth/me; no expone escritura pública de journals, ledger
 entries ni ledger accounts. El dinero se recibe y devuelve como JSON strings.
 Customer y Account no tienen idempotencia; las transferencias requieren
 `Idempotency-Key` y reproducen el resultado original con 201, body y Location.
 
-Swagger UI: `http://127.0.0.1:8080/swagger-ui.html`.
+Swagger UI en dev: `http://127.0.0.1:8080/swagger-ui.html`.
 OpenAPI: `http://127.0.0.1:8080/v3/api-docs` (el v3 corresponde a OpenAPI,
 no a una API bancaria v3). Ambas funciones se configuran mediante las variables
 anteriores. La documentación describe únicamente la superficie `/api/v1/**`.
-Es una herramienta de desarrollo; no proporciona controles de seguridad.
-La fase 6 no modifica V1–V7, no necesita V8 y conserva `ddl-auto: validate`.
+Swagger incluye Bearer JWT; sus rutas se permiten únicamente en dev.
+La Fase 7A añade V8 para auth_users/auth_user_roles. V1–V7 permanecen intactas
+y se conserva `ddl-auto: validate`.
 
 ## Migraciones y JPA
 
@@ -110,9 +114,10 @@ los cambios futuros llevan otra versión.
 V4 crea `ledger_accounts`; V5 crea `journal_transactions`; V6 crea
 `ledger_entries`, funciones, triggers e índices del ledger.
 V7 crea `transfers`, `transfer_idempotency_records`, sus índices y guards.
+V8 crea `auth_users` y `auth_user_roles`, sin credenciales iniciales.
 
 Hibernate usa `ddl-auto: validate` y `open-in-view: false`. Valida las tablas y
-columnas de las siete entidades al inicializarse. Los CHECK, índices, triggers y
+columnas de las ocho entidades al inicializarse. Los CHECK, índices, triggers y
 reglas referenciales se definen mediante Flyway y se prueban directamente en SQL.
 La tabla técnica de V1 continúa sin entidad JPA y se comprueba mediante JDBC.
 
@@ -463,6 +468,6 @@ docker compose down
 En Linux/macOS usar `./mvnw` en lugar de `.\mvnw.cmd`.
 Testcontainers y CI/CD quedan para una etapa posterior. No se incorporan campos
 balance, números de cuenta, CLABE, beneficiarios, reservas de fondos, depósitos, retiros,
-autenticación, JWT, Kafka, Redis ni
+refresh tokens, gestión HTTP de roles, Kafka, Redis ni
 microservicios. CHECKING y SAVINGS son clasificaciones: no implican intereses
 ni sobregiros. No hay conversión de divisas ni reconciliación externa.

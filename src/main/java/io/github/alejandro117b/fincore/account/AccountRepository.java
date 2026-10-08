@@ -14,6 +14,8 @@ public interface AccountRepository extends JpaRepository<Account, UUID> {
 
     List<Account> findAllByCustomerId(UUID customerId);
 
+    boolean existsByIdAndCustomerId(UUID id, UUID customerId);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select a from Account a where a.id = :id")
     Optional<Account> findByIdForUpdate(UUID id);

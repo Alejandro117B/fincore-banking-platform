@@ -24,6 +24,20 @@ Ambas condiciones son obligatorias: perfil `dev` y propiedad
 
 En PowerShell:
 
+Antes del primer arranque habilitado, configurar las claves RSA externas de dev
+y suministrar `FINCORE_DEMO_ALEJANDRO_PASSWORD` y
+`FINCORE_DEMO_FERNANDO_PASSWORD` por configuración externa (12–128 caracteres).
+No escribir contraseñas en argumentos ni archivos versionados. Ver
+[security-7a.md](security-7a.md) para claves y aprovisionamiento.
+
+Los logins predeterminados son `alejandro.demo@example.test` y
+`fernando.demo@example.test`; pueden fijarse mediante
+`FINCORE_DEMO_ALEJANDRO_EMAIL` y `FINCORE_DEMO_FERNANDO_EMAIL` en la primera
+creación. Se asocian exclusivamente a los Customer IDs persistidos, con rol USER.
+Un reinicio conserva UUIDs y hashes aunque cambien los passwords externos.
+Cambiar el login configurado de una identidad ya creada falla sin reasociarla.
+No se crea ADMIN demo. La definición financiera y su hash permanecen intactos.
+
 ```powershell
 .\mvnw.cmd "-Dspring-boot.run.arguments=--spring.profiles.active=dev --fincore.demo.seed.enabled=true" spring-boot:run
 ```
@@ -57,7 +71,8 @@ Customers y Accounts, el UUID del journal y la huella SHA-256 de la definición
 se conservan en `demo_seed_runs` bajo la PK `scenario_key`.
 
 El log de arranque exitoso muestra los cuatro IDs, el journal y el saldo inicial
-esperado de Alejandro. Se registra después de confirmar la transacción. El
+esperado de Alejandro, además de los dos AuthUser IDs, sin passwords ni tokens.
+Se registra después de confirmar las transacciones. El
 importe esperado describe el escenario original, no el saldo actual.
 
 Para recuperar los IDs con una conexión SQL de desarrollo:
