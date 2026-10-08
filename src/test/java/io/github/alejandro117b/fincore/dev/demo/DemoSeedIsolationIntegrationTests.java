@@ -38,6 +38,8 @@ class DemoSeedIsolationIntegrationTests {
 
     @Test
     void prodIgnoresEnabledPropertyAndDoesNotLoadTheDemoMigration() {
+        assertThat(jdbc.queryForObject("SELECT current_database()", String.class)).isEqualTo("fincore");
+        assertThat(jdbc.queryForObject("SELECT current_schema()", String.class)).isEqualTo(SCHEMA);
         assertThat(context.getBeansOfType(StarterDemoSeeder.class)).isEmpty();
         assertThat(context.containsBean("demoSeedRunner")).isFalse();
         assertThat(flyway.getConfiguration().getLocations()).extracting(Object::toString)

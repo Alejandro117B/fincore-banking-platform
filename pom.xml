@@ -70,6 +70,24 @@
     <build>
         <plugins>
             <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- Manual dev activation must not leak into the test JVM. -->
+                    <excludedEnvironmentVariables>
+                        <excludedEnvironmentVariable>SPRING_PROFILES_ACTIVE</excludedEnvironmentVariable>
+                        <excludedEnvironmentVariable>FINCORE_DEMO_SEED_ENABLED</excludedEnvironmentVariable>
+                    </excludedEnvironmentVariables>
+                    <systemPropertyVariables>
+                        <!-- Also isolate flags imported from the local .env. Tests opt in explicitly. -->
+                        <spring.profiles.active></spring.profiles.active>
+                        <FINCORE_DEMO_SEED_ENABLED>false</FINCORE_DEMO_SEED_ENABLED>
+                        <POSTGRES_DB>fincore</POSTGRES_DB>
+                        <POSTGRES_DEV_DB>fincore_dev</POSTGRES_DEV_DB>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+            <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
             </plugin>

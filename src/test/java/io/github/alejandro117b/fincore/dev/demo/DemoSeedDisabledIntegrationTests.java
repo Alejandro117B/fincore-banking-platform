@@ -38,6 +38,8 @@ class DemoSeedDisabledIntegrationTests {
 
     @Test
     void devProfileWithDisabledPropertyMigratesOnlyMetadataAndCreatesNoFunds() {
+        assertThat(jdbc.queryForObject("SELECT current_database()", String.class)).isEqualTo("fincore_dev");
+        assertThat(jdbc.queryForObject("SELECT current_schema()", String.class)).isEqualTo(SCHEMA);
         assertThat(context.getEnvironment().getProperty("fincore.demo.seed.enabled", Boolean.class)).isFalse();
         assertThat(context.getBeansOfType(StarterDemoSeeder.class)).isEmpty();
         assertThat(context.containsBean("demoSeedRunner")).isFalse();

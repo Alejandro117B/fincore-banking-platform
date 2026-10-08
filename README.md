@@ -34,7 +34,7 @@ docker compose config --quiet
 docker compose up -d --wait postgres
 docker compose ps
 .\mvnw.cmd -B -ntp clean verify
-.\mvnw.cmd spring-boot:run
+.\mvnw.cmd "-Dspring-boot.run.arguments=--spring.profiles.active= --fincore.demo.seed.enabled=false" spring-boot:run
 ```
 
 Si `.env` ya existe, conservarlo. Compose lee `.env` y Spring lo importa
@@ -46,7 +46,8 @@ El archivo `.env` está ignorado por Git; solo se versiona `.env.example`.
 |---|---|---|
 | `POSTGRES_HOST` | `localhost` | Host usado por FinCore |
 | `POSTGRES_PORT` | `5432` | Puerto publicado y usado por FinCore |
-| `POSTGRES_DB` | `fincore` | Base de datos inicial |
+| `POSTGRES_DB` | `fincore` | Base del perfil default; base inicial de Compose |
+| `POSTGRES_DEV_DB` | `fincore_dev` | Base exclusiva del perfil `dev` |
 | `POSTGRES_USER` | `fincore` | Usuario local |
 | `POSTGRES_PASSWORD` | Obligatoria | Contraseña local |
 | `SERVER_ADDRESS` | `127.0.0.1` | Dirección de escucha de la API, configurable para despliegues futuros |
@@ -58,6 +59,30 @@ FinCore se ejecuta en el host; PostgreSQL publica su puerto solo en `127.0.0.1`.
 El volumen `postgres_data` conserva los datos entre reinicios. Las variables de
 inicialización solo crean credenciales y base cuando el volumen está vacío;
 cambiarlas después no modifica los datos existentes.
+
+Configurar `POSTGRES_DB=fincore` y `POSTGRES_DEV_DB=fincore_dev` en `.env`.
+Ambas bases deben existir previamente: Compose inicializa solo `POSTGRES_DB`
+cuando el volumen está vacío y no crea automáticamente `fincore_dev`.
+Default y dev reutilizan host, puerto, usuario y contraseña, pero conservan
+historiales Flyway independientes. Default carga solo `classpath:db/migration`;
+dev añade `classpath:db/dev-migration` y mantiene el seeder deshabilitado por defecto.
+
+Arrancar dev sin cargar fondos:
+
+```powershell
+.\mvnw.cmd "-Dspring-boot.run.arguments=--spring.profiles.active=dev --fincore.demo.seed.enabled=false" spring-boot:run
+```
+
+Arrancar dev con `starter-mxn-v1` habilitado:
+
+```powershell
+.\mvnw.cmd "-Dspring-boot.run.arguments=--spring.profiles.active=dev --fincore.demo.seed.enabled=true" spring-boot:run
+```
+
+Estos comandos fijan el perfil y el flag explícitamente, incluso si quedaron
+variables de activación de una ejecución manual anterior. La suite también
+aísla esos flags en Surefire y fija sus bases en `fincore` y `fincore_dev`,
+conservando las variables de conexión de host, puerto, usuario y contraseña.
 
 ## API REST v1
 

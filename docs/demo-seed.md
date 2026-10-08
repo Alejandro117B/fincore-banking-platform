@@ -9,11 +9,15 @@ El único escenario es `starter-mxn-v1`:
 
 ## Activación
 
-Usar una base o esquema exclusivo de desarrollo, con la conexión PostgreSQL
-configurada mediante las variables habituales de FinCore. El perfil `dev`
-incorpora una migración técnica adicional; otros perfiles siguen cargando solo
-`classpath:db/migration`. No compartir el historial Flyway de desarrollo con
-un entorno que no carga las migraciones de desarrollo.
+Configurar `POSTGRES_DB=fincore` y `POSTGRES_DEV_DB=fincore_dev` en `.env`.
+Default se conecta a `fincore`; dev sobrescribe únicamente la URL para conectarse
+a `fincore_dev`. Ambos reutilizan las variables de host, puerto, usuario y
+contraseña. Las bases deben existir previamente: ni la aplicación ni Flyway
+crean bases de datos; Compose no crea una segunda base en el volumen existente.
+
+Default carga solo `classpath:db/migration`. El perfil `dev` utiliza esa misma
+ubicación y añade `classpath:db/dev-migration`. Cada base conserva su propio
+historial Flyway; no compartir el historial demo con default.
 
 Ambas condiciones son obligatorias: perfil `dev` y propiedad
 `fincore.demo.seed.enabled=true`. La propiedad es `false` por defecto.
@@ -21,9 +25,7 @@ Ambas condiciones son obligatorias: perfil `dev` y propiedad
 En PowerShell:
 
 ```powershell
-$env:SPRING_PROFILES_ACTIVE = 'dev'
-$env:FINCORE_DEMO_SEED_ENABLED = 'true'
-.\mvnw.cmd spring-boot:run
+.\mvnw.cmd "-Dspring-boot.run.arguments=--spring.profiles.active=dev --fincore.demo.seed.enabled=true" spring-boot:run
 ```
 
 También se puede configurar `fincore.demo.seed.enabled=true` como propiedad
@@ -31,16 +33,21 @@ Spring. La variable `FINCORE_DEMO_SEED_ENABLED` está conectada explícitamente 
 esa propiedad en `application-dev.yml`, incluyendo el soporte del `.env` local.
 Activar solamente la propiedad fuera de `dev` no registra el seeder.
 
-Para desactivar en la misma sesión:
+Para arrancar dev con el seeder deshabilitado:
 
 ```powershell
-$env:FINCORE_DEMO_SEED_ENABLED = 'false'
-Remove-Item Env:SPRING_PROFILES_ACTIVE -ErrorAction SilentlyContinue
+.\mvnw.cmd "-Dspring-boot.run.arguments=--spring.profiles.active=dev --fincore.demo.seed.enabled=false" spring-boot:run
 ```
 
 El perfil `dev` carga `classpath:db/dev-migration` aunque el seeder esté
-deshabilitado. En ese caso solo existe la tabla técnica vacía: no se crean
-Customers, Accounts ni fondos.
+deshabilitado. No se crean Customers, Accounts ni fondos; si la base ya contiene
+el escenario, sus IDs, movimientos y saldos actuales se conservan.
+
+Para volver al entorno default, incluso después de haber usado dev:
+
+```powershell
+.\mvnw.cmd "-Dspring-boot.run.arguments=--spring.profiles.active= --fincore.demo.seed.enabled=false" spring-boot:run
+```
 
 ## IDs y reinicios
 
@@ -93,6 +100,12 @@ commit, revierte todo y permite reintentar en el siguiente arranque.
 ```
 
 Las pruebas del seeder usan PostgreSQL real en esquemas temporales aislados.
+La suite fija `POSTGRES_DB=fincore` y `POSTGRES_DEV_DB=fincore_dev`; Surefire
+excluye las variables heredadas `SPRING_PROFILES_ACTIVE` y
+`FINCORE_DEMO_SEED_ENABLED` y neutraliza los flags del `.env` solo para los tests.
+Los casos dev y los casos de seeding optan explícitamente por su configuración.
+Las pruebas de reinicio abren contextos Spring reales y comprueban el catálogo
+PostgreSQL, la URL JDBC efectiva y la conservación de los datos entre arranques.
 Cubren activación, aislamiento de migraciones, arranque, entries y balances,
 reinicios antes y después de gastar, espera concurrente del advisory lock,
 rollback después del posting y al commit, conflicto de huella, reutilización o

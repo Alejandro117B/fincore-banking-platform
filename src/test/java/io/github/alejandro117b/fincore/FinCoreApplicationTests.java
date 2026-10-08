@@ -2,6 +2,7 @@ package io.github.alejandro117b.fincore;
 
 import java.util.Map;
 import java.util.UUID;
+import javax.sql.DataSource;
 
 import io.github.alejandro117b.fincore.account.Account;
 import io.github.alejandro117b.fincore.customer.Customer;
@@ -18,6 +19,7 @@ import org.hibernate.SessionFactory;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.ApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -38,8 +40,34 @@ class FinCoreApplicationTests {
     @Autowired
     private Flyway flyway;
 
+    @Autowired
+    private DataSource dataSource;
+
+    @Autowired
+    private ApplicationContext context;
+
     @Test
     void contextLoads() {
+    }
+
+    @Test
+    void noActiveProfileUsesTheRealDefaultDatabaseAndOnlyNormalMigrations() throws Exception {
+        assertThat(context.getEnvironment().getActiveProfiles()).isEmpty();
+        try (var connection = dataSource.getConnection()) {
+            assertThat(connection.getCatalog()).isEqualTo("fincore");
+            assertThat(connection.getMetaData().getURL()).isEqualTo(context.getEnvironment().getProperty("spring.datasource.url"));
+        }
+        assertThat(jdbcTemplate.queryForObject("SELECT current_database()", String.class)).isEqualTo("fincore");
+        assertThat(flyway.getConfiguration().getLocations()).extracting(Object::toString)
+                .containsExactly("classpath:db/migration");
+    }
+
+    @Test
+    void defaultDoesNotRequireDemoMetadataOrRegisterTheSeeder() {
+        assertThat(jdbcTemplate.queryForObject("SELECT to_regclass('public.demo_seed_runs')", String.class)).isNull();
+        assertThat(context.containsBean("starterDemoSeeder")).isFalse();
+        assertThat(context.containsBean("demoSeedRunner")).isFalse();
+        flyway.validate();
     }
 
     @Test

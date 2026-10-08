@@ -95,6 +95,8 @@ class StarterDemoSeederIntegrationTests {
 
     @Test
     void applicationRunnerSeedsOnStartupAndDevMigrationIsApplied() {
+        assertThat(jdbc.queryForObject("SELECT current_database()", String.class)).isEqualTo("fincore_dev");
+        assertThat(jdbc.queryForObject("SELECT current_schema()", String.class)).isEqualTo(SCHEMA);
         assertThat(startupIds.alejandroCustomerId()).isNotNull();
         assertThat(startupIds.fernandoCustomerId()).isNotEqualTo(startupIds.alejandroCustomerId());
         assertThat(flyway.getConfiguration().getLocations()).extracting(Object::toString)
