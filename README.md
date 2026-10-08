@@ -354,6 +354,15 @@ No hay saldo disponible, reservas de fondos, compensaciones, TTL/purga de keys,
 límites operativos ni procesos de conciliación. El alcance/sujeto de la key
 deberá revisarse al introducir identidad y autenticación.
 
+## Fondos demo de desarrollo
+
+El escenario opcional `starter-mxn-v1` crea Alejandro Demo (CHECKING MXN,
+2000.0000 iniciales) y Fernando Demo (SAVINGS MXN, saldo inicial cero).
+Solo se ejecuta con el perfil `dev` y `fincore.demo.seed.enabled=true`.
+El fondeo usa el ledger real y no se repite al reiniciar ni después de gastar.
+La activación, los IDs y las garantías transaccionales se describen en
+[la guía del seeder demo](docs/demo-seed.md).
+
 ## Verificación
 
 Las pruebas unitarias de Customer y Account no requieren Spring ni PostgreSQL:

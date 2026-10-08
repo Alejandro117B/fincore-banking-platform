@@ -3,7 +3,6 @@ package io.github.alejandro117b.fincore.api;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
-import java.util.List;
 import java.util.UUID;
 import java.util.stream.Stream;
 import io.github.alejandro117b.fincore.account.AccountService;
@@ -164,7 +163,7 @@ class ApiMvcTests {
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.code").value("INSUFFICIENT_FUNDS"))
                 .andExpect(jsonPath("$.status").value(409)).andReturn().getResponse();
         var error = json.readTree(response.getContentAsString());
-        assertThat(error.path("requestId").asText()).isEqualTo(response.getHeader("X-Request-Id"));
+        assertThat(error.path("requestId").asString()).isEqualTo(response.getHeader("X-Request-Id"));
         assertThat(response.getContentAsString()).doesNotContain("secret-key", "stackTrace", "exception", "PostgreSQL");
     }
 

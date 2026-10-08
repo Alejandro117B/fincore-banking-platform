@@ -10,7 +10,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.*;
 import io.github.alejandro117b.fincore.account.Account;
@@ -94,14 +93,14 @@ class ApiHttpIntegrationTests {
     private UUID customer() throws Exception {
         var response = request("POST", "/api/v1/customers", "{\"firstName\":\"Ana\",\"lastName\":\"Perez\"}");
         assertThat(response.statusCode()).isEqualTo(201);
-        return UUID.fromString(body(response).path("id").asText());
+        return UUID.fromString(body(response).path("id").asString());
     }
 
     private UUID account(UUID customer, String currency) throws Exception {
         var response = request("POST", "/api/v1/accounts", "{\"customerId\":\"" + customer
                 + "\",\"type\":\"CHECKING\",\"currencyCode\":\"" + currency + "\"}");
         assertThat(response.statusCode()).isEqualTo(201);
-        return UUID.fromString(body(response).path("id").asText());
+        return UUID.fromString(body(response).path("id").asString());
     }
 
     private record Pair(UUID customer, UUID source, UUID destination, UUID debit, UUID credit) {
@@ -145,7 +144,7 @@ class ApiHttpIntegrationTests {
         assertThat(response.statusCode()).isEqualTo(200);
         JsonNode value = body(response).path("postedBalance");
         assertThat(value.isString()).isTrue();
-        return value.asText();
+        return value.asString();
     }
 
     private long count(String table) { return jdbc.queryForObject("SELECT count(*) FROM " + table, Long.class); }
@@ -154,8 +153,8 @@ class ApiHttpIntegrationTests {
         assertThat(response.statusCode()).isEqualTo(status);
         JsonNode error = body(response);
         assertThat(error.path("status").asInt()).isEqualTo(status);
-        assertThat(error.path("code").asText()).isEqualTo(code);
-        assertThat(error.path("requestId").asText()).isEqualTo(response.headers().firstValue("X-Request-Id").orElseThrow());
+        assertThat(error.path("code").asString()).isEqualTo(code);
+        assertThat(error.path("requestId").asString()).isEqualTo(response.headers().firstValue("X-Request-Id").orElseThrow());
         assertThat(response.headers().firstValue("Cache-Control")).contains("no-store");
         assertThat(response.body()).doesNotContain("stackTrace", "SQLSTATE", "PostgreSQL", "Hibernate", "constraint");
     }
@@ -173,9 +172,9 @@ class ApiHttpIntegrationTests {
         var response = request("GET", "/api/v1/accounts/" + account, null);
         JsonNode accountJson = body(response);
         assertThat(response.statusCode()).isEqualTo(200);
-        assertThat(accountJson.path("customerId").asText()).isEqualTo(customer.toString());
-        assertThat(accountJson.path("status").asText()).isEqualTo("ACTIVE");
-        assertThat(accountJson.path("currencyCode").asText()).isEqualTo("MXN");
+        assertThat(accountJson.path("customerId").asString()).isEqualTo(customer.toString());
+        assertThat(accountJson.path("status").asString()).isEqualTo("ACTIVE");
+        assertThat(accountJson.path("currencyCode").asString()).isEqualTo("MXN");
         assertThat(accountJson.has("balance")).isFalse();
         assertThat(accountJson.has("version")).isFalse();
         assertThat(accountJson.has("ledgerAccount")).isFalse();
@@ -256,7 +255,7 @@ class ApiHttpIntegrationTests {
         assertThat(first.statusCode()).isEqualTo(201);
         JsonNode result = body(first);
         assertThat(result.path("amount").isString()).isTrue();
-        assertThat(result.path("amount").asText()).isEqualTo("500.0000");
+        assertThat(result.path("amount").asString()).isEqualTo("500.0000");
         assertThat(balance(pair.source())).isEqualTo("300.0000");
         assertThat(balance(pair.destination())).isEqualTo("500.0000");
         var replay = request("POST", "/api/v1/transfers", transferBody(pair, "500", "different-reference"), "Idempotency-Key", key);
@@ -270,10 +269,10 @@ class ApiHttpIntegrationTests {
         assertThat(new BigDecimal(balance(pair.source())).add(new BigDecimal(balance(pair.destination())))).isEqualByComparingTo("800");
         var history = body(request("GET", "/api/v1/accounts/" + pair.source() + "/transactions", null));
         JsonNode movement = history.path("items").get(0);
-        assertThat(movement.path("transferId").asText()).isEqualTo(result.path("id").asText());
-        assertThat(movement.path("netAmount").asText()).isEqualTo("-500.0000");
-        assertThat(movement.path("debitAmount").asText()).isEqualTo("500.0000");
-        assertThat(movement.path("creditAmount").asText()).isEqualTo("0.0000");
+        assertThat(movement.path("transferId").asString()).isEqualTo(result.path("id").asString());
+        assertThat(movement.path("netAmount").asString()).isEqualTo("-500.0000");
+        assertThat(movement.path("debitAmount").asString()).isEqualTo("500.0000");
+        assertThat(movement.path("creditAmount").asString()).isEqualTo("0.0000");
     }
 
     @Test
@@ -382,17 +381,17 @@ class ApiHttpIntegrationTests {
             JsonNode page = body(request("GET", path, null));
             assertThat(page.path("items").size()).isBetween(1, 2);
             for (JsonNode item : page.path("items")) {
-                ids.add(item.path("journalTransactionId").asText());
-                assertThat(item.path("debitAmount").asText()).isEqualTo("5.0000");
-                assertThat(item.path("creditAmount").asText()).isEqualTo("0.0000");
-                assertThat(item.path("netAmount").asText()).isEqualTo("-5.0000");
+                ids.add(item.path("journalTransactionId").asString());
+                assertThat(item.path("debitAmount").asString()).isEqualTo("5.0000");
+                assertThat(item.path("creditAmount").asString()).isEqualTo("0.0000");
+                assertThat(item.path("netAmount").asString()).isEqualTo("-5.0000");
                 assertThat(item.path("transferId").isNull()).isTrue();
             }
             if (!page.path("hasMore").asBoolean()) {
                 assertThat(page.path("nextCursor").isNull()).isTrue();
                 break;
             }
-            String cursor = page.path("nextCursor").asText();
+            String cursor = page.path("nextCursor").asString();
             if (savedCursor == null) { savedCursor = cursor; }
             path = "/api/v1/accounts/" + pair.source() + "/transactions?limit=2&cursor=" + cursor;
         } while (ids.size() < 10);
@@ -429,7 +428,7 @@ class ApiHttpIntegrationTests {
         JsonNode first = body(request("GET", "/api/v1/accounts/" + pair.source() + "/transactions", null));
         assertThat(first.path("items").size()).isEqualTo(20);
         assertThat(first.path("hasMore").asBoolean()).isTrue();
-        String cursor = first.path("nextCursor").asText();
+        String cursor = first.path("nextCursor").asString();
         tx().executeWithoutResult(status -> {
             LedgerAccount debit = ledgerAccounts.findById(pair.debit()).orElseThrow();
             LedgerAccount credit = ledgerAccounts.findById(pair.credit()).orElseThrow();
@@ -509,18 +508,18 @@ class ApiHttpIntegrationTests {
         assertThat(schemas.has("ApiError")).isTrue();
         assertThat(schemas.has("LedgerEntry")).isFalse();
         assertThat(schemas.has("TransferIdempotencyRecord")).isFalse();
-        assertThat(schemas.path("CreateTransferRequest").path("properties").path("amount").path("type").asText()).isEqualTo("string");
+        assertThat(schemas.path("CreateTransferRequest").path("properties").path("amount").path("type").asString()).isEqualTo("string");
         JsonNode operation = doc.path("paths").path("/api/v1/transfers").path("post");
         JsonNode key = null;
         for (JsonNode parameter : operation.path("parameters")) {
-            if (parameter.path("name").asText().equals("Idempotency-Key")) { key = parameter; }
+            if (parameter.path("name").asString().equals("Idempotency-Key")) { key = parameter; }
         }
         assertThat(key).isNotNull();
         assertThat(key.path("required").asBoolean()).isTrue();
         assertThat(key.path("schema").path("maxLength").asInt()).isEqualTo(128);
-        assertThat(operation.path("description").asText()).contains("201", "replay", "same key", "Reference");
+        assertThat(operation.path("description").asString()).contains("201", "replay", "same key", "Reference");
         assertThat(operation.path("responses").has("409")).isTrue();
-        assertThat(operation.path("responses").path("409").path("content").path("application/json").path("schema").path("$ref").asText())
+        assertThat(operation.path("responses").path("409").path("content").path("application/json").path("schema").path("$ref").asString())
                 .isEqualTo("#/components/schemas/ApiError");
         // Swagger UI redirect and its served page both come from the actual runtime.
         var ui = client.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/swagger-ui/index.html")).GET().build(),
