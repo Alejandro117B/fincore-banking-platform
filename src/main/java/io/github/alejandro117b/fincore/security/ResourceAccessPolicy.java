@@ -1,6 +1,7 @@
 package io.github.alejandro117b.fincore.security;
 
 import java.util.UUID;
+import io.github.alejandro117b.fincore.account.Account;
 import io.github.alejandro117b.fincore.account.AccountRepository;
 import io.github.alejandro117b.fincore.api.ApiException;
 import io.github.alejandro117b.fincore.auth.AuthRole;
@@ -16,7 +17,7 @@ public class ResourceAccessPolicy {
     public ResourceAccessPolicy(AccountRepository accounts) { this.accounts = accounts; }
 
     public void requireOwnCustomer(UUID id) {
-        var actor = user();
+        var actor = requireUser();
         if (!id.equals(actor.customerId())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "CUSTOMER_NOT_FOUND", "Customer was not found.");
         }
@@ -24,13 +25,19 @@ public class ResourceAccessPolicy {
 
     @Transactional(readOnly = true)
     public void requireOwnAccount(UUID id) {
-        var actor = user();
+        var actor = requireUser();
         if (!accounts.existsByIdAndCustomerId(id, actor.customerId())) {
             throw new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account was not found.");
         }
     }
 
-    private CurrentActor user() {
+    public void requireOwnLockedAccount(Account account, CurrentActor actor) {
+        if (account == null || !actor.customerId().equals(account.getCustomer().getId())) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account was not found.");
+        }
+    }
+
+    public CurrentActor requireUser() {
         var actor = CurrentActor.require();
         if (!actor.roles().contains(AuthRole.USER)) { throw new AccessDeniedException("Access is forbidden"); }
         return actor;

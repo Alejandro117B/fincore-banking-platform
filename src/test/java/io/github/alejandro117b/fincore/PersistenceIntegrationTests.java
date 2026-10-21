@@ -14,20 +14,31 @@ import io.github.alejandro117b.fincore.account.AccountStatus;
 import io.github.alejandro117b.fincore.account.AccountType;
 import io.github.alejandro117b.fincore.customer.Customer;
 import io.github.alejandro117b.fincore.customer.CustomerRepository;
+import io.github.alejandro117b.fincore.support.IsolatedPostgresSchema;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.EntityManagerFactory;
 import jakarta.persistence.OptimisticLockException;
 import jakarta.persistence.PersistenceContext;
 import org.hibernate.Hibernate;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.flyway.autoconfigure.FlywayMigrationStrategy;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -38,9 +49,26 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest
 @Transactional
+@Import(PersistenceIntegrationTests.SchemaMigration.class)
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class PersistenceIntegrationTests {
 
     private static final Instant CREATED_AT = Instant.parse("2026-10-06T12:00:00.123456Z");
+    private static final String SCHEMA = "persistence_test_" + UUID.randomUUID().toString().replace("-", "");
+
+    @DynamicPropertySource
+    static void isolatedSchema(DynamicPropertyRegistry properties) {
+        IsolatedPostgresSchema.register(properties, SCHEMA);
+    }
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class SchemaMigration {
+        @Bean
+        FlywayMigrationStrategy migrateOnlyThisSchema() {
+            return flyway -> IsolatedPostgresSchema.migrate(flyway, SCHEMA);
+        }
+    }
 
     @Autowired
     private CustomerRepository customers;
@@ -59,6 +87,12 @@ class PersistenceIntegrationTests {
 
     @PersistenceContext
     private EntityManager entityManager;
+
+    @BeforeEach
+    void verifyPersistenceConnectionsAreIsolated() {
+        assertThat(jdbc.queryForList("SELECT unnest(current_schemas(false))", String.class)).containsExactly(SCHEMA);
+        assertThat(entityManagerFactory.getProperties()).containsEntry("hibernate.default_schema", SCHEMA);
+    }
 
     @Test
     void persistsAndReloadsCustomerWithVersionAndTimestamps() {
@@ -335,5 +369,10 @@ class PersistenceIntegrationTests {
                     assertThat(cause).isInstanceOf(SQLException.class);
                     assertThat(((SQLException) cause).getSQLState()).isEqualTo(sqlState);
                 });
+    }
+
+    @AfterAll
+    void removeOnlyThisRunsSchema() {
+        IsolatedPostgresSchema.drop(jdbc, SCHEMA);
     }
 }

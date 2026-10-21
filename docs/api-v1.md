@@ -1,9 +1,9 @@
-# FinCore API v1 — fases 6 y 7A
+# FinCore API v1 — fases 6, 7A y 7B
 
 Fase 7A añade login JWT, ownership para lecturas de Customer/Account y creación
-administrativa. Transferencias exige autenticación, pero ownership e idempotencia
-por identidad quedan pendientes de 7B. V1–V7 y el ledger permanecen intactos;
-V8 crea identidad/roles, sin balances mutables. Ver [security-7a.md](security-7a.md).
+administrativa. 7B exige USER y ownership para transferencias e idempotencia
+por AuthUser. V1–V8 y el ledger permanecen intactos; V9 cambia el scope de keys,
+sin balances mutables. Ver [security-7a.md](security-7a.md) y [security-7b.md](security-7b.md).
 
 ## Endpoints y DTOs
 
@@ -111,7 +111,16 @@ Idempotency-Key es obligatorio únicamente en POST /api/v1/transfers:
 - Exactamente un valor.
 - Longitud 1–128 y patrón [A-Za-z0-9._:-]+.
 - Case-sensitive. No se normaliza ni se genera automáticamente.
-- Alcance global del caso de uso; el futuro alcance por identidad queda pendiente.
+- Alcance `(AuthUser.id, Idempotency-Key)`; requester procede de CurrentActor.
+- Keys históricas retiradas: 409 IDEMPOTENCY_KEY_UNAVAILABLE, mensaje genérico,
+  sin datos del registro anterior ni recomendación de usar otra key.
+
+POST exige USER y origen propio; el destino puede pertenecer a otro Customer.
+Origen ajeno e inexistente: mismo 404 ACCOUNT_NOT_FOUND, sin reserva persistida.
+GET exige USER y participación actual por origen o destino; ajeno e inexistente:
+mismo 404 TRANSFER_NOT_FOUND. ADMIN sin USER recibe 403; ambos roles conservan
+ownership. Un replay de POST pertenece únicamente al AuthUser que lo inició y
+exige ownership actual del origen; no comprueba saldo ni ACTIVE nuevamente.
 
 El controller solo valida el header, mapea el body a TransferCommand y delega.
 No calcula hashes, reserva keys ni abre una transacción alrededor del servicio.
@@ -119,7 +128,7 @@ No calcula hashes, reserva keys ni abre una transacción alrededor del servicio.
 Original y replay exitoso devuelven **201, body y Location originales**. Cada
 request tiene su propio X-Request-Id. Una reference diferente con el mismo
 contenido económico devuelve la reference original: reference no forma parte
-del hash. Un cambio económico con la misma key devuelve 409 IDEMPOTENCY_CONFLICT.
+del hash. Un cambio económico con mismo actor/key devuelve 409 IDEMPOTENCY_CONFLICT.
 
 Los rechazos esperados se confirman como REJECTED antes de comunicar el error HTTP.
 Un retry reproduce el código y mensaje de negocio, aunque luego se agreguen
@@ -287,15 +296,15 @@ El esquema generado se elimina al finalizar; no se alteran datos de public.
 .\mvnw.cmd -B -ntp clean verify
 ```
 
-Resultado: **342 pruebas, 0 fallos, 0 errores, 0 omitidas**, BUILD SUCCESS y JAR
+Resultado histórico de Fase 6: **342 pruebas, 0 fallos, 0 errores, 0 omitidas**, BUILD SUCCESS y JAR
 generado. Incluye las 267 pruebas previas y 75 de esta fase (14 mapping/cursor,
 36 MVC y 25 HTTP/PostgreSQL). El documento generado por la prueba HTTP queda
 en target/api-openapi.json. El JAR también arrancó con SERVER_ADDRESS=127.0.0.2,
 SERVER_PORT=0 y OPENAPI_ENABLED/SWAGGER_UI_ENABLED=false: documentación y UI
 devolvieron 404; PostgreSQL/Flyway V7 e Hibernate inicializaron correctamente.
 
-Quedan pendientes ownership de transferencias y alcance de keys por identidad,
-idempotencia para creación Customer/Account, snapshots históricos estrictos,
+La Fase 7B completa ownership e idempotencia de transferencias por identidad.
+Quedan pendientes idempotencia para creación Customer/Account, snapshots históricos estrictos,
 rendimiento a escala, separación de usuarios Flyway/runtime y CI/Testcontainers.
 No se implementan depósitos, retiros, balance materializado, Kafka, Redis,
 microservicios, refresh tokens ni endpoints de administración contable.

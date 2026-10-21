@@ -1,10 +1,10 @@
 # FinCore
 
 Proyecto profesional de portafolio de backend bancario y fintech.
-La Fase 7A incorpora identidad, login JWT y autorización de lecturas y creación
-administrativa en la API `/api/v1`. Conserva journals completos e inmutables.
-Ownership e idempotencia de transferencias quedan pendientes de 7B: no exponer
-la aplicación a usuarios no confiables hasta completar esa fase.
+Las fases 7A y 7B incorporan identidad, login JWT, autorización de recursos y
+transferencias con ownership e idempotencia por AuthUser en la API `/api/v1`.
+Se conservan journals completos e inmutables. Diseño y operación de 7B:
+[docs/security-7b.md](docs/security-7b.md).
 Configuración de claves, permisos y primer ADMIN: [docs/security-7a.md](docs/security-7a.md).
 
 ## Tecnologías
@@ -100,7 +100,8 @@ OpenAPI: `http://127.0.0.1:8080/v3/api-docs` (el v3 corresponde a OpenAPI,
 no a una API bancaria v3). Ambas funciones se configuran mediante las variables
 anteriores. La documentación describe únicamente la superficie `/api/v1/**`.
 Swagger incluye Bearer JWT; sus rutas se permiten únicamente en dev.
-La Fase 7A añade V8 para auth_users/auth_user_roles. V1–V7 permanecen intactas
+La Fase 7A añade V8 para auth_users/auth_user_roles y 7B añade V9 para el scope
+de idempotencia por identidad. V1–V8 permanecen intactas
 y se conserva `ddl-auto: validate`.
 
 ## Migraciones y JPA
@@ -115,6 +116,8 @@ V4 crea `ledger_accounts`; V5 crea `journal_transactions`; V6 crea
 `ledger_entries`, funciones, triggers e índices del ledger.
 V7 crea `transfers`, `transfer_idempotency_records`, sus índices y guards.
 V8 crea `auth_users` y `auth_user_roles`, sin credenciales iniciales.
+V9 añade requester y unicidad por AuthUser/key; conserva historia anónima y
+retira sus keys para nuevos POST sin revelar el motivo en la respuesta.
 
 Hibernate usa `ddl-auto: validate` y `open-in-view: false`. Valida las tablas y
 columnas de las ocho entidades al inicializarse. Los CHECK, índices, triggers y
@@ -267,7 +270,8 @@ ledger. La idempotencia permanece separada de los registros contables.
 ## Transferencias internas
 
 `TransferService.execute(TransferCommand)` es la entrada de aplicación, sin
-dependencia de HTTP. Devuelve `TransferResult`, un snapshot sin proxies JPA.
+dependencia de HTTP; requiere CurrentActor autenticado con USER y origen propio.
+Devuelve `TransferResult`, un snapshot sin proxies JPA.
 Transfer representa únicamente una operación completada e inmutable: UUID,
 origen, destino, amount, currencyCode, reference opcional, journal obligatorio,
 createdAt y completedAt. No tiene estado intermedio ni @Version. Sus relaciones
@@ -304,7 +308,8 @@ reproducir registros históricos; no se cambia silenciosamente el contrato v1.
 
 La validación estructural y normalización ocurren antes de reservar una key.
 Las keys son sensibles a mayúsculas, de 1 a 128 caracteres `[A-Za-z0-9._:-]`,
-y globales dentro del caso de uso de transferencia interna. Los inputs inválidos
+y únicas por `(AuthUser.id, Idempotency-Key)`. Requester se obtiene únicamente
+de CurrentActor y no se añade al hash v1. Los inputs inválidos
 producen INVALID_REQUEST, INVALID_AMOUNT o INVALID_CURRENCY sin crear registros.
 
 El servicio exige invocación fuera de una transacción existente y administra una
@@ -312,15 +317,20 @@ El servicio exige invocación fuera de una transacción existente y administra u
 garantizar el commit antes de comunicar un rechazo y comenzar con un contexto
 JPA nuevo, sin Accounts precargadas con estados obsoletos.
 
-1. INSERT RESERVED mediante ON CONFLICT (idempotency_key) DO NOTHING RETURNING id.
+1. Comprobar USER, normalizar y abrir la transacción propia; comprobar ownership
+   inicial del origen sin lock anticipado y detectar keys históricas retiradas.
+   INSERT RESERVED mediante ON CONFLICT (requester_user_id, idempotency_key)
+   DO NOTHING RETURNING id.
    El índice único espera al propietario concurrente. Si confirma, un SELECT
    posterior consulta el resultado terminal; si hace rollback, el otro INSERT
    puede convertirse en propietario. No se captura una violación de unicidad
    dentro de una transacción abortada ni se usan transacciones separadas para
-   reservar. Misma key/hash devuelve el resultado previo; otro hash/version
+   reservar. Se vuelve a comprobar ownership después de la espera.
+   Mismo actor/key/hash devuelve el resultado previo; otro hash/version
    produce IDEMPOTENCY_CONFLICT sin modificarlo.
-2. Rechazar origen = destino; bloquear Accounts por UUID; comprobar existencia,
-   ACTIVE en ambas y moneda. BLOCKED y CLOSED no pueden originar ni recibir.
+2. Rechazar origen = destino; bloquear Accounts por UUID; volver a comprobar
+   ownership del origen bloqueado y comprobar existencia, ACTIVE en ambas y
+   moneda. BLOCKED y CLOSED no pueden originar ni recibir operaciones nuevas.
 3. Localizar y bloquear LedgerAccounts por UUID; comprobar vínculos, LIABILITY
    y moneda. Consultar después el saldo POSTED del origen (credits - debits)
    y comprobar fondos suficientes.
@@ -329,7 +339,7 @@ JPA nuevo, sin Accounts precargadas con estados obsoletos.
 5. Persistir Transfer; hacer flush antes de finalizar la FK idempotente;
    marcar SUCCEEDED con Transfer y resolvedAt; flush y commit real.
 
-Los rechazos esperados devuelven internamente TransferExecutionOutcome.Rejected:
+Los rechazos financieros autorizados devuelven TransferExecutionOutcome.Rejected:
 se marca REJECTED con failureCode y resolvedAt, se confirma y **después** la capa
 exterior lanza TransferException con un código independiente del transporte.
 INSUFFICIENT_FUNDS sigue reproduciéndose con la misma key aunque después se
@@ -337,6 +347,14 @@ agreguen fondos. No se utiliza noRollbackFor. Los errores técnicos, SQL,
 constraints, timeouts de lock y deadlocks se propagan como fallos técnicos y
 hacen rollback de reserva, journal, líneas y Transfer; no consumen la key ni
 crean REJECTED. No hay retry automático.
+
+Los rechazos de seguridad no consumen keys ni crean journals. Origen ajeno o
+inexistente devuelve el mismo 404 ACCOUNT_NOT_FOUND. El replay exige ownership
+actual del origen, pero no vuelve a validar estado ni saldo; devuelve el resultado
+original sin movimiento adicional. GET exige USER y participación actual como
+origen o destino; terceros e inexistentes devuelven 404 TRANSFER_NOT_FOUND.
+ADMIN no obtiene bypass. Las keys históricas devuelven únicamente
+409 IDEMPOTENCY_KEY_UNAVAILABLE con mensaje genérico, sin sugerir otra key.
 
 Un RESERVED no tiene Transfer, failureCode ni resolvedAt y nunca puede
 confirmarse. SUCCEEDED requiere Transfer única y resolvedAt, sin failureCode;

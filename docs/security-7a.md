@@ -17,18 +17,17 @@ HTTP de roles, recuperación de contraseñas, impersonación ni rate limiting.
 | GET /api/v1/accounts/{id} | USER, cuenta propia |
 | GET /api/v1/accounts/{id}/balance | USER, cuenta propia |
 | GET /api/v1/accounts/{id}/transactions | USER, cuenta propia |
-| POST /api/v1/transfers | Autenticado; ownership pendiente de 7B |
-| GET /api/v1/transfers/{id} | Autenticado; ownership pendiente de 7B |
+| POST /api/v1/transfers | USER y origen propio (7B) |
+| GET /api/v1/transfers/{id} | USER y participante actual (7B) |
 
 ADMIN no implica USER. Con ambos roles, las lecturas siguen restringidas por
 ownership. Recursos ajenos e inexistentes producen el mismo 404. Las demás
 rutas/métodos se deniegan. No se configura CORS abierto, Basic ni form login.
 
-**Transferencias aún no están aisladas por identidad.** Una identidad autenticada
-puede acceder a las operaciones actuales de transferencias, incluidas cuentas
-ajenas. Su idempotencia sigue siendo global. Esto es una limitación explícita
-de 7A: no exponer FinCore a usuarios no confiables hasta completar 7B.
-TransferService, sus guards, V7 y sus límites transaccionales permanecen intactos.
+La Fase 7B completa ownership de transferencias y aisla idempotencia por
+AuthUser. ADMIN no obtiene bypass. Ver [security-7b.md](security-7b.md) para V9,
+replays, tratamiento histórico y despliegue. El ledger y los límites
+transaccionales de TransferService se conservan.
 
 ## Identidad y passwords
 
@@ -137,10 +136,9 @@ esquemas temporales; la suite prueba upgrade V7→V8, constraints, login, claims
 firma inválida, revocación, roles, ownership, errores, OpenAPI y reinicio demo
 en modo read-only con credenciales externas distintas.
 
-7B debe resolver ownership de transferencias y sus replays, y el alcance de
-idempotencia por identidad. Rate limiting, refresh, password recovery y
-gestión de roles no forman parte de 7A.
+7B completa ownership e idempotencia por identidad. Rate limiting, refresh,
+password recovery y gestión de roles no forman parte de estas fases.
 
-Resultado verificado con `.\mvnw.cmd -B -ntp clean verify`: **416 pruebas,
+Resultado histórico de cierre de 7A con `.\mvnw.cmd -B -ntp clean verify`: **416 pruebas,
 0 failures, 0 errors, 0 skipped; BUILD SUCCESS**. Son las 366 pruebas previas
 adaptadas más 50 nuevas. JAR: `target/fincore-0.0.1-SNAPSHOT.jar`.

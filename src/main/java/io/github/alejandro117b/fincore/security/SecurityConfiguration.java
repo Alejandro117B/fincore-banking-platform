@@ -48,9 +48,9 @@ public class SecurityConfiguration {
                     routes.requestMatchers(org.springframework.http.HttpMethod.POST, "/api/v1/customers", "/api/v1/accounts").hasRole("ADMIN");
                     routes.requestMatchers(org.springframework.http.HttpMethod.GET, "/api/v1/customers/*",
                             "/api/v1/accounts/*", "/api/v1/accounts/*/balance", "/api/v1/accounts/*/transactions").hasRole("USER");
-                    // Phase 7A: authentication only. Ownership and idempotency remain explicitly pending for 7B.
-                    routes.requestMatchers(org.springframework.http.HttpMethod.POST, "/api/v1/transfers").authenticated();
-                    routes.requestMatchers(org.springframework.http.HttpMethod.GET, "/api/v1/transfers/*").authenticated();
+                    // Transfer ownership is also enforced inside the application transaction.
+                    routes.requestMatchers(org.springframework.http.HttpMethod.POST, "/api/v1/transfers").hasRole("USER");
+                    routes.requestMatchers(org.springframework.http.HttpMethod.GET, "/api/v1/transfers/*").hasRole("USER");
                     if (env.acceptsProfiles(Profiles.of("dev"))) {
                         routes.requestMatchers(org.springframework.http.HttpMethod.GET, "/v3/api-docs", "/v3/api-docs/**",
                                 "/swagger-ui.html", "/swagger-ui/**").permitAll();

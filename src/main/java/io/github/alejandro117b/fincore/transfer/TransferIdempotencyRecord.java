@@ -21,6 +21,9 @@ public class TransferIdempotencyRecord {
     @Column(nullable = false, updatable = false)
     private UUID id;
 
+    @Column(name = "requester_user_id", updatable = false)
+    private UUID requesterUserId;
+
     @Column(name = "idempotency_key", nullable = false, length = 128, updatable = false)
     private String idempotencyKey;
 
@@ -52,6 +55,7 @@ public class TransferIdempotencyRecord {
     }
 
     public UUID getId() { return id; }
+    public UUID getRequesterUserId() { return requesterUserId; }
     public String getIdempotencyKey() { return idempotencyKey; }
     public String getRequestHash() { return requestHash; }
     public int getHashVersion() { return hashVersion; }

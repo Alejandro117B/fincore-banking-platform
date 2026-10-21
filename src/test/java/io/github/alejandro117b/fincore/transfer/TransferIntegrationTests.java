@@ -1,6 +1,9 @@
 package io.github.alejandro117b.fincore.transfer;
 
 import java.math.BigDecimal;
+import io.github.alejandro117b.fincore.auth.*;
+import io.github.alejandro117b.fincore.security.*;
+import io.github.alejandro117b.fincore.api.ApiException;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
@@ -69,6 +72,18 @@ class TransferIntegrationTests {
     }
 
     @Autowired private TransferService service;
+    @Autowired private AuthUserProvisioningService provisioning;
+    @Autowired private AuthUserRepository identities;
+    private CurrentActor defaultActor;
+    private final Map<UUID, CurrentActor> fixtureActors = new ConcurrentHashMap<>();
+
+    @BeforeEach
+    void authenticatedFixture() { fixture(); }
+
+    private TransferResult execute(TransferCommand command) {
+        CurrentActor actor = fixtureActors.getOrDefault(command.sourceAccountId(), defaultActor);
+        return TestActors.call(actor, () -> service.execute(command));
+    }
     @Autowired private TransferRepository transfers;
     @Autowired private TransferIdempotencyRepository idempotency;
     @Autowired private AccountRepository accounts;
@@ -110,6 +125,9 @@ class TransferIntegrationTests {
                 em.persist(cash);
             }
             em.flush();
+            defaultActor = TestActors.provision(owner.getId(), provisioning, identities);
+            fixtureActors.put(source.getId(), defaultActor);
+            fixtureActors.put(destination.getId(), defaultActor);
             return new Fixture(source, destination, debit, credit, cash);
         });
     }
@@ -134,7 +152,7 @@ class TransferIntegrationTests {
     }
 
     private TransferException rejected(TransferCommand command, TransferErrorCode code) {
-        Throwable failure = catchThrowable(() -> service.execute(command));
+        Throwable failure = catchThrowable(() -> execute(command));
         assertThat(failure).isInstanceOf(TransferException.class);
         assertThat(((TransferException) failure).getCode()).isEqualTo(code);
         return (TransferException) failure;
@@ -150,11 +168,224 @@ class TransferIntegrationTests {
     }
 
     @Test
+    void foreignAndMissingSourcesAreSecurityRejectionsWithoutReservationsOrJournals() {
+        Fixture own = fixture();
+        CurrentActor actor = fixtureActors.get(own.source().getId());
+        Fixture foreign = fixture();
+        long reservations = count("transfer_idempotency_records");
+        long journals = count("journal_transactions");
+        for (UUID source : List.of(foreign.source().getId(), UUID.randomUUID())) {
+            Throwable failure = catchThrowable(() -> TestActors.call(actor, () -> service.execute(
+                    new TransferCommand(source, own.destination().getId(), BigDecimal.ONE, "MXN", key(), null))));
+            assertThat(failure).isInstanceOf(ApiException.class).hasMessage("Account was not found.");
+        }
+        assertThat(count("transfer_idempotency_records")).isEqualTo(reservations);
+        assertThat(count("journal_transactions")).isEqualTo(journals);
+    }
+
+    @Test
+    void foreignDestinationIsAllowedAndOnlyCurrentParticipantsCanRead() {
+        Fixture sender = fixture();
+        Fixture recipient = fixture();
+        Fixture stranger = fixture();
+        fund(sender, "500");
+        TransferResult result = execute(new TransferCommand(sender.source().getId(), recipient.destination().getId(),
+                new BigDecimal("100"), "MXN", key(), null));
+        assertThat(balances.getBalance(recipient.credit().getId())).isEqualByComparingTo("100");
+        assertThat(transfers.findVisibleResult(result.id(), sender.source().getCustomer().getId())).contains(result);
+        assertThat(transfers.findVisibleResult(result.id(), recipient.source().getCustomer().getId())).contains(result);
+        assertThat(transfers.findVisibleResult(result.id(), stranger.source().getCustomer().getId())).isEmpty();
+        assertThat(transfers.findVisibleResult(UUID.randomUUID(), stranger.source().getCustomer().getId())).isEmpty();
+    }
+
+    @Test
+    void differentIdentitiesCanUseIdenticalKeysWithoutClaimingEachOthersReplay() {
+        Fixture a = fixture();
+        Fixture b = fixture();
+        fund(a, "500");
+        fund(b, "500");
+        String key = key();
+        TransferResult first = execute(command(a, "100", key));
+        assertThatThrownBy(() -> TestActors.call(fixtureActors.get(b.source().getId()),
+                () -> service.execute(command(a, "100", key)))).isInstanceOf(ApiException.class);
+        TransferResult second = execute(command(b, "100", key));
+        assertThat(second.id()).isNotEqualTo(first.id());
+        assertThat(second.journalTransactionId()).isNotEqualTo(first.journalTransactionId());
+        assertThat(execute(command(a, "100.00", key))).isEqualTo(first);
+        assertThat(execute(command(b, "100.0000", key))).isEqualTo(second);
+        assertThat(jdbc.queryForObject("SELECT count(DISTINCT requester_user_id) FROM transfer_idempotency_records WHERE idempotency_key = ?",
+                Integer.class, key)).isEqualTo(2);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BLOCKED", "CLOSED"})
+    void successfulReplayIgnoresCurrentBalanceAndAccountStatus(String status) {
+        Fixture f = fixture();
+        fund(f, "100");
+        TransferCommand request = command(f, "100", key());
+        TransferResult first = execute(request);
+        transactions().executeWithoutResult(tx -> {
+            Account source = accounts.findByIdForUpdate(f.source().getId()).orElseThrow();
+            if (status.equals("BLOCKED")) { source.block(EXECUTED_AT); }
+            else { source.close(EXECUTED_AT); }
+        });
+        long journals = count("journal_transactions");
+        assertThat(execute(request)).isEqualTo(first);
+        assertThat(count("journal_transactions")).isEqualTo(journals);
+        assertThat(balances.getBalance(f.debit().getId())).isEqualByComparingTo("0");
+    }
+
+    @Test
+    void ownershipChangesWithdrawReplayPermissionAndChangeGetParticipants() {
+        Fixture original = fixture();
+        CurrentActor actor = fixtureActors.get(original.source().getId());
+        Fixture next = fixture();
+        fund(original, "100");
+        TransferCommand request = command(original, "100", key());
+        TransferResult result = execute(request);
+        jdbc.update("UPDATE accounts SET customer_id = ? WHERE id IN (?, ?)", next.source().getCustomer().getId(),
+                original.source().getId(), original.destination().getId());
+        assertThatThrownBy(() -> TestActors.call(actor, () -> service.execute(request))).isInstanceOf(ApiException.class);
+        assertThat(transfers.findVisibleResult(result.id(), actor.customerId())).isEmpty();
+        assertThat(transfers.findVisibleResult(result.id(), next.source().getCustomer().getId())).contains(result);
+        assertThat(record(request.idempotencyKey())).containsEntry("requester_user_id", actor.userId());
+    }
+
+    @Test
+    void concurrentDifferentActorsUsingIdenticalKeyHaveIndependentPostings() throws Exception {
+        Fixture a = fixture();
+        Fixture b = fixture();
+        fund(a, "500");
+        fund(b, "500");
+        String key = key();
+        var results = race(command(a, "100", key), command(b, "100", key));
+        assertThat(results).allMatch(TransferResult.class::isInstance);
+        assertThat(results.stream().map(result -> ((TransferResult) result).id()).toList()).doesNotHaveDuplicates();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM transfer_idempotency_records WHERE idempotency_key = ? AND status = 'SUCCEEDED'",
+                Integer.class, key)).isEqualTo(2);
+        assertThat(balances.getBalance(a.debit().getId())).isEqualByComparingTo("400");
+        assertThat(balances.getBalance(b.debit().getId())).isEqualByComparingTo("400");
+    }
+
+    @Test
+    void newNullRequesterAndUnknownRequesterAreRejectedInSql() {
+        for (UUID requester : java.util.Arrays.asList(null, UUID.randomUUID())) {
+            assertSqlState(catchThrowable(() -> transactions().executeWithoutResult(tx -> jdbc.update("""
+                    INSERT INTO transfer_idempotency_records (id, requester_user_id, idempotency_key,
+                        request_hash, hash_version, status, created_at)
+                    VALUES (?, ?, ?, ?, 1, 'RESERVED', ?)
+                    """, UUID.randomUUID(), requester, key(), "a".repeat(64), Timestamp.from(AT)))),
+                    requester == null ? "23514" : "23503");
+        }
+    }
+
+    @Test
+    void requesterCannotChangeDuringFinalizationAndCompletionCannotUseAnotherActor() {
+        UUID requester = defaultActor.userId();
+        Fixture other = fixture();
+        UUID stranger = fixtureActors.get(other.source().getId()).userId();
+        assertSqlState(catchThrowable(() -> transactions().executeWithoutResult(tx -> {
+            UUID id = idempotency.reserve(requester, key(), "a".repeat(64), AT).orElseThrow();
+            jdbc.update("UPDATE transfer_idempotency_records SET requester_user_id = ?, status = 'REJECTED', "
+                    + "failure_code = 'INSUFFICIENT_FUNDS', resolved_at = created_at WHERE id = ?", stranger, id);
+        })), "23514");
+        assertThatThrownBy(() -> transactions().executeWithoutResult(tx -> {
+            UUID id = idempotency.reserve(requester, key(), "a".repeat(64), AT).orElseThrow();
+            idempotency.reject(id, stranger, TransferErrorCode.INSUFFICIENT_FUNDS, AT);
+        })).isInstanceOf(org.springframework.dao.InvalidDataAccessApiUsageException.class)
+                .hasCauseInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void referencedAuthUserCannotBeDeletedAndTerminalRequesterCannotBeChanged() {
+        Fixture f = fixture();
+        String key = key();
+        rejected(command(f, "100", key), TransferErrorCode.INSUFFICIENT_FUNDS);
+        UUID requester = fixtureActors.get(f.source().getId()).userId();
+        assertSqlState(catchThrowable(() -> transactions().executeWithoutResult(tx ->
+                jdbc.update("DELETE FROM auth_users WHERE id = ?", requester))), "23001");
+        assertSqlState(catchThrowable(() -> transactions().executeWithoutResult(tx ->
+                jdbc.update("UPDATE transfer_idempotency_records SET requester_user_id = NULL WHERE idempotency_key = ?", key))), "23514");
+    }
+
+    @Test
+    void ownershipRecheckedUnderAccountLockRollsBackTheNewReservation() throws Exception {
+        Fixture f = fixture();
+        CurrentActor actor = fixtureActors.get(f.source().getId());
+        Fixture nextOwner = fixture();
+        fund(f, "500");
+        TransferCommand request = command(f, "100", key());
+        long records = count("transfer_idempotency_records");
+        long journals = count("journal_transactions");
+        CountDownLatch locked = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicReference<Integer> pid = new AtomicReference<>();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> reassignment = workers.submit(() -> transactions().executeWithoutResult(tx -> {
+                pid.set(jdbc.queryForObject("SELECT pg_backend_pid()", Integer.class));
+                accounts.findByIdForUpdate(f.source().getId()).orElseThrow();
+                jdbc.update("UPDATE accounts SET customer_id = ? WHERE id = ?", nextOwner.source().getCustomer().getId(), f.source().getId());
+                locked.countDown();
+                await(release);
+            }));
+            assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<Throwable> transfer = workers.submit(() -> catchThrowable(() -> TestActors.call(actor, () -> service.execute(request))));
+            waitUntil(() -> jdbc.queryForObject("SELECT count(*) FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))",
+                    Integer.class, pid.get()) > 0);
+            release.countDown();
+            reassignment.get(10, TimeUnit.SECONDS);
+            assertThat(transfer.get(15, TimeUnit.SECONDS)).isInstanceOf(ApiException.class).hasMessage("Account was not found.");
+            assertThat(count("transfer_idempotency_records")).isEqualTo(records);
+            assertThat(count("journal_transactions")).isEqualTo(journals);
+            assertThat(balances.getBalance(f.debit().getId())).isEqualByComparingTo("500");
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            assertThat(workers.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void waitingReplayRechecksOwnershipBeforeReturningACommittedFinancialRejection() throws Exception {
+        Fixture f = fixture();
+        CurrentActor actor = fixtureActors.get(f.source().getId());
+        Fixture nextOwner = fixture();
+        TransferCommand request = command(f, "100", key());
+        String hash = TransferRequestHasher.hash(request.sourceAccountId(), request.destinationAccountId(), request.amount(), "MXN");
+        CountDownLatch reserved = new CountDownLatch(1), release = new CountDownLatch(1);
+        AtomicReference<Integer> pid = new AtomicReference<>();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> original = workers.submit(() -> transactions().executeWithoutResult(tx -> {
+                pid.set(jdbc.queryForObject("SELECT pg_backend_pid()", Integer.class));
+                UUID id = idempotency.reserve(actor.userId(), request.idempotencyKey(), hash, AT).orElseThrow();
+                reserved.countDown();
+                await(release);
+                jdbc.update("UPDATE accounts SET customer_id = ? WHERE id = ?", nextOwner.source().getCustomer().getId(), f.source().getId());
+                idempotency.reject(id, actor.userId(), TransferErrorCode.INSUFFICIENT_FUNDS, AT);
+            }));
+            assertThat(reserved.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<Throwable> replay = workers.submit(() -> catchThrowable(() -> TestActors.call(actor, () -> service.execute(request))));
+            waitUntil(() -> jdbc.queryForObject("SELECT count(*) FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid))",
+                    Integer.class, pid.get()) > 0);
+            release.countDown();
+            original.get(10, TimeUnit.SECONDS);
+            assertThat(replay.get(15, TimeUnit.SECONDS)).isInstanceOf(ApiException.class).hasMessage("Account was not found.");
+            assertThat(record(request.idempotencyKey())).containsEntry("requester_user_id", actor.userId())
+                    .containsEntry("status", "REJECTED").containsEntry("failure_code", "INSUFFICIENT_FUNDS");
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            assertThat(workers.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
     void transfers500WithExactLedgerAndLazyRelationshipsAndDeterministicTimestamps() {
         Fixture f = fixture();
         fund(f, "800");
         TransferCommand command = command(f, "500.00", key());
-        TransferResult result = service.execute(command);
+        TransferResult result = execute(command);
         assertThat(result.amount()).isEqualTo(new BigDecimal("500.0000"));
         assertThat(result.createdAt()).isEqualTo(EXECUTED_AT);
         assertThat(result.completedAt()).isEqualTo(EXECUTED_AT);
@@ -189,7 +420,7 @@ class TransferIntegrationTests {
     void supportedCurrenciesCanReallyTransfer(String currency) {
         Fixture f = fixture(currency, currency, true);
         fund(f, "800");
-        TransferResult result = service.execute(command(f, currency.equals("JPY") ? "500" : "500.12", key()));
+        TransferResult result = execute(command(f, currency.equals("JPY") ? "500" : "500.12", key()));
         assertThat(result.currencyCode()).isEqualTo(currency);
         assertThat(balances.getBalance(f.debit().getId()).add(balances.getBalance(f.credit().getId())))
                 .isEqualByComparingTo("800");
@@ -213,7 +444,7 @@ class TransferIntegrationTests {
         assertThat(balances.getBalance(f.credit().getId())).isEqualByComparingTo("0");
         assertThat(count("journal_transactions")).isEqualTo(journalsBefore + 1);
         // A different key can use the now-funded account.
-        assertThat(service.execute(command(f, "500", key())).id()).isNotNull();
+        assertThat(execute(command(f, "500", key())).id()).isNotNull();
     }
 
     @ParameterizedTest
@@ -265,8 +496,7 @@ class TransferIntegrationTests {
     void missingBankOrLedgerAccountIsAStableBusinessRejection() {
         Fixture f = fixture("MXN", "MXN", false);
         rejected(command(f, "1", key()), TransferErrorCode.LEDGER_ACCOUNT_NOT_FOUND);
-        rejected(new TransferCommand(UUID.randomUUID(), f.destination().getId(), BigDecimal.ONE, "MXN", key(), null),
-                TransferErrorCode.ACCOUNT_NOT_FOUND);
+        assertThatThrownBy(() -> execute(new TransferCommand(UUID.randomUUID(), f.destination().getId(), BigDecimal.ONE, "MXN", key(), null))).isInstanceOf(ApiException.class);
         rejected(new TransferCommand(f.source().getId(), UUID.randomUUID(), BigDecimal.ONE, "MXN", key(), null),
                 TransferErrorCode.ACCOUNT_NOT_FOUND);
     }
@@ -297,9 +527,9 @@ class TransferIntegrationTests {
         Fixture f = fixture();
         fund(f, "800");
         String key = key();
-        TransferResult original = service.execute(command(f, "500", key));
+        TransferResult original = execute(command(f, "500", key));
         long journals = count("journal_transactions");
-        TransferResult replay = service.execute(new TransferCommand(f.source().getId(), f.destination().getId(),
+        TransferResult replay = execute(new TransferCommand(f.source().getId(), f.destination().getId(),
                 new BigDecimal("500.00"), "mxn", key, "changed-reference"));
         assertThat(replay).isEqualTo(original);
         assertThat(replay.reference()).isEqualTo("original-reference");
@@ -314,7 +544,7 @@ class TransferIntegrationTests {
         Fixture f = fixture();
         fund(f, "800");
         String key = key();
-        service.execute(command(f, "500", key));
+        execute(command(f, "500", key));
         Map<String, Object> original = record(key);
         rejected(command(f, "501", key), TransferErrorCode.IDEMPOTENCY_CONFLICT);
         rejected(new TransferCommand(f.destination().getId(), f.source().getId(), new BigDecimal("500"), "MXN", key, null),
@@ -325,7 +555,7 @@ class TransferIntegrationTests {
     @Test
     void cannotBeCalledInsideAnAmbientTransaction() {
         Fixture f = fixture();
-        assertThatIllegalStateException().isThrownBy(() -> transactions().executeWithoutResult(status -> service.execute(command(f, "1", key()))));
+        assertThatIllegalStateException().isThrownBy(() -> transactions().executeWithoutResult(status -> execute(command(f, "1", key()))));
     }
 
     @ParameterizedTest
@@ -346,7 +576,7 @@ class TransferIntegrationTests {
                 : "CREATE CONSTRAINT TRIGGER test_fail_transfer AFTER INSERT ON transfers DEFERRABLE INITIALLY DEFERRED "
                     + "FOR EACH ROW EXECUTE FUNCTION test_fail_transfer()");
         try {
-            Throwable failure = catchThrowable(() -> service.execute(request));
+            Throwable failure = catchThrowable(() -> execute(request));
             assertThat(failure).isNotNull().isNotInstanceOf(TransferException.class);
             assertSqlState(failure, "XX000");
         } finally {
@@ -360,14 +590,14 @@ class TransferIntegrationTests {
                 request.idempotencyKey())).isZero();
         assertThat(balances.getBalance(f.debit().getId())).isEqualByComparingTo("800");
         // Technical failure does not consume the key.
-        assertThat(service.execute(request).id()).isNotNull();
+        assertThat(execute(request).id()).isNotNull();
     }
 
     @Test
     void aRealCommitOfAnUnresolvedReservationIsRejectedByTheDeferredGuard() {
         String key = key();
         Throwable failure = catchThrowable(() -> transactions().executeWithoutResult(status -> {
-            idempotency.reserve(key, "a".repeat(64), AT).orElseThrow();
+            idempotency.reserve(defaultActor.userId(), key, "a".repeat(64), AT).orElseThrow();
             assertThat(jdbc.queryForObject("SELECT status FROM transfer_idempotency_records WHERE idempotency_key = ?", String.class, key))
                     .isEqualTo("RESERVED");
             // Callback ends normally: TransactionTemplate really attempts COMMIT.
@@ -383,7 +613,7 @@ class TransferIntegrationTests {
     void financialAndTerminalIdempotencyRecordsRejectDirectSqlMutations(String sql) {
         Fixture f = fixture();
         fund(f, "800");
-        service.execute(command(f, "500", key()));
+        execute(command(f, "500", key()));
         Throwable failure = catchThrowable(() -> transactions().executeWithoutResult(status -> jdbc.execute(sql)));
         assertSqlState(failure, "23514");
     }
@@ -403,9 +633,9 @@ class TransferIntegrationTests {
     void terminalRowsCannotBeInsertedDirectly(String status) {
         String key = key();
         assertSqlState(catchThrowable(() -> transactions().executeWithoutResult(transaction -> jdbc.update("""
-                INSERT INTO transfer_idempotency_records (id,idempotency_key,request_hash,hash_version,status,created_at)
-                VALUES (?,?,?,1,?,?)
-                """, UUID.randomUUID(), key, "a".repeat(64), status, Timestamp.from(AT)))), "23514");
+                INSERT INTO transfer_idempotency_records (id,requester_user_id,idempotency_key,request_hash,hash_version,status,created_at)
+                VALUES (?,?,?,?,1,?,?)
+                """, UUID.randomUUID(), defaultActor.userId(), key, "a".repeat(64), status, Timestamp.from(AT)))), "23514");
     }
 
     @ParameterizedTest
@@ -419,7 +649,7 @@ class TransferIntegrationTests {
     void invalidFinalizationCannotPassSqlConstraints(String assignments) {
         String key = key();
         assertSqlState(catchThrowable(() -> transactions().executeWithoutResult(status -> {
-            UUID id = idempotency.reserve(key, "a".repeat(64), AT).orElseThrow();
+            UUID id = idempotency.reserve(defaultActor.userId(), key, "a".repeat(64), AT).orElseThrow();
             jdbc.update("UPDATE transfer_idempotency_records SET " + assignments + " WHERE id = ?", id);
         })), "23514");
     }
@@ -450,8 +680,8 @@ class TransferIntegrationTests {
                     """, transferId, f.source().getId(), f.destination().getId(),
                     new BigDecimal(violation.equals("wrong-amount") ? "400" : "500"), journal.getId(), Timestamp.from(AT), Timestamp.from(AT));
             if (!violation.equals("no-idempotency")) {
-                UUID id = idempotency.reserve(key(), "a".repeat(64), AT).orElseThrow();
-                idempotency.succeed(id, transferId, AT);
+                UUID id = idempotency.reserve(defaultActor.userId(), key(), "a".repeat(64), AT).orElseThrow();
+                idempotency.succeed(id, defaultActor.userId(), transferId, AT);
             }
             // No exception in this callback: PostgreSQL must reject the actual COMMIT.
         }));
@@ -463,7 +693,7 @@ class TransferIntegrationTests {
     void duplicateJournalCannotRepresentTwoTransfers() {
         Fixture f = fixture();
         fund(f, "800");
-        TransferResult result = service.execute(command(f, "500", key()));
+        TransferResult result = execute(command(f, "500", key()));
         assertSqlState(catchThrowable(() -> transactions().executeWithoutResult(status -> jdbc.update("""
                 INSERT INTO transfers (id,source_account_id,destination_account_id,amount,currency_code,
                     journal_transaction_id,created_at,completed_at) VALUES (?,?,?,500,'MXN',?,?,?)
@@ -513,8 +743,8 @@ class TransferIntegrationTests {
     @Test
     void succeededRecordCannotPointToAMissingTransfer() {
         assertSqlState(catchThrowable(() -> transactions().executeWithoutResult(status -> {
-            UUID reservation = idempotency.reserve(key(), "a".repeat(64), AT).orElseThrow();
-            idempotency.succeed(reservation, UUID.randomUUID(), AT);
+            UUID reservation = idempotency.reserve(defaultActor.userId(), key(), "a".repeat(64), AT).orElseThrow();
+            idempotency.succeed(reservation, defaultActor.userId(), UUID.randomUUID(), AT);
         })), "23503");
     }
 
@@ -522,10 +752,10 @@ class TransferIntegrationTests {
     void succeededRecordMustBeTheUniqueOwnerOfItsTransfer() {
         Fixture f = fixture();
         fund(f, "800");
-        TransferResult transfer = service.execute(command(f, "500", key()));
+        TransferResult transfer = execute(command(f, "500", key()));
         assertSqlState(catchThrowable(() -> transactions().executeWithoutResult(status -> {
-            UUID reservation = idempotency.reserve(key(), "a".repeat(64), AT).orElseThrow();
-            idempotency.succeed(reservation, transfer.id(), AT);
+            UUID reservation = idempotency.reserve(defaultActor.userId(), key(), "a".repeat(64), AT).orElseThrow();
+            idempotency.succeed(reservation, defaultActor.userId(), transfer.id(), AT);
         })), "23505");
     }
 
@@ -556,8 +786,8 @@ class TransferIntegrationTests {
                 await(release);
             }));
             assertThat(held.await(5, TimeUnit.SECONDS)).isTrue();
-            Future<TransferResult> first = executor.submit(() -> service.execute(request));
-            Future<TransferResult> second = executor.submit(() -> service.execute(request));
+            Future<TransferResult> first = executor.submit(() -> execute(request));
+            Future<TransferResult> second = executor.submit(() -> execute(request));
             // A waits for the Account holder; B waits for A's uncommitted unique-key reservation.
             waitUntil(() -> jdbc.queryForObject("""
                     SELECT count(*) FROM pg_stat_activity a JOIN pg_stat_activity b
@@ -674,8 +904,8 @@ class TransferIntegrationTests {
                 await(release);
             }));
             assertThat(held.await(5, TimeUnit.SECONDS)).isTrue();
-            Future<TransferResult> forward = executor.submit(() -> service.execute(command(f, "500", key())));
-            Future<TransferResult> reverse = executor.submit(() -> service.execute(new TransferCommand(
+            Future<TransferResult> forward = executor.submit(() -> execute(command(f, "500", key())));
+            Future<TransferResult> reverse = executor.submit(() -> execute(new TransferCommand(
                     f.destination().getId(), f.source().getId(), new BigDecimal("500"), "MXN", key(), null)));
             // PostgreSQL may queue the second waiter behind the first (a tuple lock),
             // so follow the complete blocking tree instead of expecting two direct edges.
@@ -714,7 +944,7 @@ class TransferIntegrationTests {
     }
 
     private Object attempt(TransferCommand command) {
-        try { return service.execute(command); }
+        try { return execute(command); }
         catch (TransferException exception) { return exception.getCode(); }
         // Technical failures intentionally escape the Future, making a concurrency test fail.
     }
@@ -733,13 +963,13 @@ class TransferIntegrationTests {
         try {
             Future<?> owner = executor.submit(() -> transactions().executeWithoutResult(status -> {
                 ownerPid.set(jdbc.queryForObject("SELECT pg_backend_pid()", Integer.class));
-                abandoned.set(idempotency.reserve(request.idempotencyKey(), hash, AT).orElseThrow());
+                abandoned.set(idempotency.reserve(defaultActor.userId(), request.idempotencyKey(), hash, AT).orElseThrow());
                 reserved.countDown();
                 await(rollback);
                 throw new IllegalStateException("simulated technical rollback of owner");
             }));
             assertThat(reserved.await(5, TimeUnit.SECONDS)).isTrue();
-            Future<TransferResult> contender = executor.submit(() -> service.execute(request));
+            Future<TransferResult> contender = executor.submit(() -> execute(request));
             // Observe a real PostgreSQL lock wait, rather than relying on a scheduling delay.
             waitUntil(() -> jdbc.queryForObject("""
                     SELECT count(*) FROM pg_stat_activity
@@ -808,11 +1038,11 @@ class TransferIntegrationTests {
 
     @Test
     void flywayAndHibernateValidateTheRealTransferSchema() {
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("8");
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("9");
         assertThat(flyway.info().pending()).isEmpty();
         assertThat(em.getEntityManagerFactory().getProperties()).containsEntry("hibernate.hbm2ddl.auto", "validate");
         assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history WHERE success AND version IS NOT NULL ORDER BY installed_rank", String.class))
-                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9");
         assertThat(jdbc.queryForObject("SELECT count(*) FROM transfer_idempotency_records WHERE status = 'RESERVED'", Integer.class)).isZero();
     }
 

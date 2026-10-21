@@ -7,6 +7,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import io.github.alejandro117b.fincore.security.CurrentActor;
+import io.github.alejandro117b.fincore.security.ResourceAccessPolicy;
 
 import io.github.alejandro117b.fincore.account.Account;
 import io.github.alejandro117b.fincore.account.AccountRepository;
@@ -39,12 +41,13 @@ public class TransferService {
     private final EntityManager entityManager;
     private final JdbcTemplate jdbc;
     private final Clock clock;
+    private final ResourceAccessPolicy access;
 
     public TransferService(PlatformTransactionManager manager, AccountRepository accounts,
                            LedgerAccountRepository ledgerAccounts, LedgerBalanceService balances,
                            LedgerPostingService posting, TransferRepository transfers,
                            TransferIdempotencyRepository idempotency, EntityManager entityManager,
-                           JdbcTemplate jdbc, Clock clock) {
+                           JdbcTemplate jdbc, Clock clock, ResourceAccessPolicy access) {
         this.transactions = new TransactionTemplate(manager);
         this.transactions.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
         this.transactions.setTimeout(15);
@@ -57,6 +60,7 @@ public class TransferService {
         this.entityManager = entityManager;
         this.jdbc = jdbc;
         this.clock = clock;
+        this.access = access;
     }
 
     public TransferResult execute(TransferCommand command) {
@@ -65,10 +69,11 @@ public class TransferService {
         if (TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("TransferService must be invoked outside an existing transaction");
         }
+        CurrentActor actor = access.requireUser();
         TransferCommand normalized = normalize(command);
         String hash = TransferRequestHasher.hash(normalized.sourceAccountId(), normalized.destinationAccountId(),
                 normalized.amount(), normalized.currencyCode());
-        TransferExecutionOutcome outcome = transactions.execute(status -> executeInTransaction(normalized, hash));
+        TransferExecutionOutcome outcome = transactions.execute(status -> executeInTransaction(normalized, hash, actor));
         if (outcome instanceof TransferExecutionOutcome.Success success) {
             return success.transfer();
         }
@@ -78,19 +83,28 @@ public class TransferService {
         throw new IllegalStateException("Missing transfer outcome");
     }
 
-    private TransferExecutionOutcome executeInTransaction(TransferCommand command, String hash) {
+    private TransferExecutionOutcome executeInTransaction(TransferCommand command, String hash, CurrentActor actor) {
         // Transaction-local PostgreSQL setting; lock timeouts are technical failures, never REJECTED.
         jdbc.execute("SET LOCAL lock_timeout = '10s'");
+        access.requireOwnAccount(command.sourceAccountId());
+        idempotency.requireAvailableKey(command.idempotencyKey());
         Instant createdAt = now();
-        var reservation = idempotency.reserve(command.idempotencyKey(), hash, createdAt);
+        var reservation = idempotency.reserve(actor.userId(), command.idempotencyKey(), hash, createdAt);
+        // A conflicting INSERT can wait for another transaction. Recheck current ownership afterward.
+        access.requireOwnAccount(command.sourceAccountId());
         if (reservation.isEmpty()) {
-            var previous = idempotency.find(command.idempotencyKey());
+            var previous = idempotency.findByRequesterAndKey(actor.userId(), command.idempotencyKey());
             if (previous.hashVersion() != TransferRequestHasher.HASH_VERSION || !previous.hash().equals(hash)) {
                 return new TransferExecutionOutcome.Rejected(TransferErrorCode.IDEMPOTENCY_CONFLICT);
             }
             return switch (previous.status()) {
-                case SUCCEEDED -> new TransferExecutionOutcome.Success(TransferResult.from(
-                        transfers.findById(previous.transferId()).orElseThrow()));
+                case SUCCEEDED -> new TransferExecutionOutcome.Success(transfers.findReplayResult(
+                        previous.id(), actor.userId(), hash, TransferRequestHasher.HASH_VERSION, actor.customerId())
+                        .orElseThrow(() -> {
+                            // Ownership may change between the scalar check and this filtered projection.
+                            access.requireOwnAccount(command.sourceAccountId());
+                            return new IllegalStateException("Successful reservation has no authorized transfer");
+                        }));
                 case REJECTED -> new TransferExecutionOutcome.Rejected(previous.failureCode());
                 case RESERVED -> throw new IllegalStateException("A committed reservation must be terminal");
             };
@@ -99,34 +113,35 @@ public class TransferService {
         UUID sourceId = command.sourceAccountId();
         UUID destinationId = command.destinationAccountId();
         if (sourceId.equals(destinationId)) {
-            return reject(reservationId, TransferErrorCode.SAME_ACCOUNT);
+            return reject(actor.userId(), reservationId, TransferErrorCode.SAME_ACCOUNT);
         }
         Map<UUID, Account> lockedAccounts = new HashMap<>();
         for (UUID id : TransferLockOrder.ordered(sourceId, destinationId)) {
             accounts.findByIdForUpdate(id).ifPresent(account -> lockedAccounts.put(id, account));
         }
+        access.requireOwnLockedAccount(lockedAccounts.get(sourceId), actor);
         if (lockedAccounts.size() != 2) {
-            return reject(reservationId, TransferErrorCode.ACCOUNT_NOT_FOUND);
+            return reject(actor.userId(), reservationId, TransferErrorCode.ACCOUNT_NOT_FOUND);
         }
         Account source = lockedAccounts.get(sourceId);
         Account destination = lockedAccounts.get(destinationId);
         for (Account account : List.of(source, destination)) {
             if (account.getStatus() == AccountStatus.BLOCKED) {
-                return reject(reservationId, TransferErrorCode.ACCOUNT_BLOCKED);
+                return reject(actor.userId(), reservationId, TransferErrorCode.ACCOUNT_BLOCKED);
             }
             if (account.getStatus() == AccountStatus.CLOSED) {
-                return reject(reservationId, TransferErrorCode.ACCOUNT_CLOSED);
+                return reject(actor.userId(), reservationId, TransferErrorCode.ACCOUNT_CLOSED);
             }
         }
         for (Account account : List.of(source, destination)) {
             if (!command.currencyCode().equals(account.getCurrencyCode())) {
-                return reject(reservationId, TransferErrorCode.CURRENCY_MISMATCH);
+                return reject(actor.userId(), reservationId, TransferErrorCode.CURRENCY_MISMATCH);
             }
         }
         var sourceLedger = ledgerAccounts.findByAccountId(sourceId);
         var destinationLedger = ledgerAccounts.findByAccountId(destinationId);
         if (sourceLedger.isEmpty() || destinationLedger.isEmpty()) {
-            return reject(reservationId, TransferErrorCode.LEDGER_ACCOUNT_NOT_FOUND);
+            return reject(actor.userId(), reservationId, TransferErrorCode.LEDGER_ACCOUNT_NOT_FOUND);
         }
         Map<UUID, LedgerAccount> lockedLedgers = new HashMap<>();
         for (UUID id : TransferLockOrder.ordered(sourceLedger.orElseThrow().getId(), destinationLedger.orElseThrow().getId())) {
@@ -137,7 +152,7 @@ public class TransferService {
         verifyLedger(debit, sourceId, command.currencyCode());
         verifyLedger(credit, destinationId, command.currencyCode());
         if (balances.getBalance(debit.getId()).compareTo(command.amount()) < 0) {
-            return reject(reservationId, TransferErrorCode.INSUFFICIENT_FUNDS);
+            return reject(actor.userId(), reservationId, TransferErrorCode.INSUFFICIENT_FUNDS);
         }
         JournalTransaction journal = JournalTransaction.draft(command.currencyCode(), command.reference(), createdAt);
         posting.post(journal, List.of(
@@ -149,13 +164,13 @@ public class TransferService {
         entityManager.persist(transfer);
         // JDBC finalization has an immediate FK to Transfer: make its INSERT visible first.
         entityManager.flush();
-        idempotency.succeed(reservationId, transfer.getId(), completedAt);
+        idempotency.succeed(reservationId, actor.userId(), transfer.getId(), completedAt);
         entityManager.flush();
         return new TransferExecutionOutcome.Success(TransferResult.from(transfer));
     }
 
-    private TransferExecutionOutcome reject(UUID reservationId, TransferErrorCode code) {
-        idempotency.reject(reservationId, code, now());
+    private TransferExecutionOutcome reject(UUID requester, UUID reservationId, TransferErrorCode code) {
+        idempotency.reject(reservationId, requester, code, now());
         return new TransferExecutionOutcome.Rejected(code);
     }
 

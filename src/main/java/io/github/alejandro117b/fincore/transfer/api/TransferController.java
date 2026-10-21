@@ -35,7 +35,7 @@ public class TransferController {
     // Deliberately no @Transactional: TransferService commits rejections before throwing.
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     @ResponseStatus(HttpStatus.CREATED)
-    @Operation(summary = "Execute an internal transfer", description = "Original and successful replay both return 201, identical body and Location. Same key and different economic request: 409. Reference is excluded from the hash; replays preserve the original reference. Expected rejections are committed and replayed; technical transaction failures roll back. A lost HTTP response may follow a successful commit: retry with the same key. MXN/USD: 2 decimals; JPY: 0.")
+    @Operation(summary = "Execute an internal transfer", description = "Requires USER and current source ownership. Destination may belong to another Customer. Keys are scoped to AuthUser; unavailable keys return generic 409 IDEMPOTENCY_KEY_UNAVAILABLE. Original and successful replay both return 201, identical body and Location. Same actor/key and different economic request: 409. Reference is excluded from the hash; replays preserve the original reference. Expected rejections are committed and replayed; technical transaction failures roll back. A lost HTTP response may follow a successful commit: retry with the same key. MXN/USD: 2 decimals; JPY: 0.")
     public ResponseEntity<TransferResponse> create(@Valid @RequestBody CreateTransferRequest request,
             @Parameter(required = true, description = "Exactly one case-sensitive value; 1–128 characters. Required only for this endpoint.",
                     schema = @Schema(type = "string", minLength = 1, maxLength = 128, pattern = "[A-Za-z0-9._:-]+"))
@@ -49,7 +49,7 @@ public class TransferController {
     }
 
     @GetMapping("/{id}")
-    @Operation(summary = "Get a completed transfer", description = "Rejected requests do not create a Transfer resource.")
+    @Operation(summary = "Get a completed transfer", description = "Requires USER and current source or destination ownership. Missing and foreign transfers both return 404 TRANSFER_NOT_FOUND. ADMIN has no bypass. Rejected requests do not create a Transfer resource.")
     public TransferResponse get(@PathVariable String id) {
         return TransferApiMapper.from(queries.get(ApiInputs.uuid(id)));
     }

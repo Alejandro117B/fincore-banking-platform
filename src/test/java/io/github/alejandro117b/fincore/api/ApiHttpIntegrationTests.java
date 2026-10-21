@@ -11,6 +11,8 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.Set;
+import io.github.alejandro117b.fincore.auth.AuthRole;
 import java.util.concurrent.*;
 import io.github.alejandro117b.fincore.account.Account;
 import io.github.alejandro117b.fincore.account.AccountRepository;
@@ -82,11 +84,21 @@ class ApiHttpIntegrationTests {
         fixtureCustomer = customerService.create("HTTP", "Fixture", null).id();
     }
 
-    private String actorToken(String path) {
+    private String actorToken(String path, String body) {
         UUID owner = fixtureCustomer;
         String resource = path.split("\\?")[0];
         try {
-            if (resource.startsWith("/api/v1/accounts/")) {
+            if (resource.equals("/api/v1/transfers") && body != null) {
+                try {
+                    UUID id = UUID.fromString(json.readTree(body).path("sourceAccountId").asString());
+                    var found = jdbc.queryForList("SELECT customer_id FROM accounts WHERE id = ?", UUID.class, id);
+                    if (!found.isEmpty()) { owner = found.getFirst(); }
+                } catch (RuntimeException ignored) { /* malformed input still has a valid actor */ }
+            } else if (resource.startsWith("/api/v1/transfers/")) {
+                UUID id = UUID.fromString(resource.split("/")[4]);
+                var found = jdbc.queryForList("SELECT a.customer_id FROM transfers t JOIN accounts a ON a.id = t.source_account_id WHERE t.id = ?", UUID.class, id);
+                if (!found.isEmpty()) { owner = found.getFirst(); }
+            } else if (resource.startsWith("/api/v1/accounts/")) {
                 UUID id = UUID.fromString(resource.split("/")[4]);
                 var found = jdbc.queryForList("SELECT customer_id FROM accounts WHERE id = ?", UUID.class, id);
                 if (!found.isEmpty()) { owner = found.getFirst(); }
@@ -112,7 +124,7 @@ class ApiHttpIntegrationTests {
     private HttpResponse<String> request(String method, String path, String body, String... headers) throws Exception {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
                 .timeout(Duration.ofSeconds(20)).header("Accept", "application/json")
-                .header("Authorization", "Bearer " + actorToken(path));
+                .header("Authorization", "Bearer " + actorToken(path, body));
         if (body != null) { builder.header("Content-Type", "application/json"); }
         for (int index = 0; index < headers.length; index += 2) { builder.header(headers[index], headers[index + 1]); }
         return client.send(builder.method(method, body == null ? HttpRequest.BodyPublishers.noBody()
@@ -122,6 +134,108 @@ class ApiHttpIntegrationTests {
     private JsonNode body(HttpResponse<String> response) {
         assertThat(response.headers().firstValue("X-Request-Id")).isPresent();
         return json.readTree(response.body());
+    }
+
+    private String identityToken(UUID customer, Set<AuthRole> roles) {
+        UUID id = provisioning.provision(UUID.randomUUID() + "@transfer.example.test", "transfer-http-password", customer, roles);
+        String token = tokens.issue(identities.findById(id).orElseThrow());
+        if (customer != null) { actorTokens.put(customer, token); }
+        return token;
+    }
+
+    private HttpResponse<String> requestAs(String token, String method, String path, String body, String... headers) throws Exception {
+        var builder = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .timeout(Duration.ofSeconds(20)).header("Accept", "application/json")
+                .header("Authorization", "Bearer " + token);
+        if (body != null) { builder.header("Content-Type", "application/json"); }
+        for (int i = 0; i < headers.length; i += 2) { builder.header(headers[i], headers[i + 1]); }
+        return client.send(builder.method(method, body == null ? HttpRequest.BodyPublishers.noBody()
+                : HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
+    void userTransfersToAnotherCustomerAndBothParticipantsCanReadButAThirdCannot() throws Exception {
+        Pair sender = pair();
+        Pair recipient = pair();
+        Pair third = pair();
+        String user = identityToken(sender.customer(), Set.of(AuthRole.USER));
+        String receiver = identityToken(recipient.customer(), Set.of(AuthRole.USER));
+        String stranger = identityToken(third.customer(), Set.of(AuthRole.USER));
+        fund(sender.debit(), "500");
+        String economic = transferBody(sender, "100", "external destination")
+                .replace(sender.destination().toString(), recipient.destination().toString());
+        var created = requestAs(user, "POST", "/api/v1/transfers", economic, "Idempotency-Key", UUID.randomUUID().toString());
+        assertThat(created.statusCode()).isEqualTo(201);
+        String path = "/api/v1/transfers/" + body(created).path("id").asString();
+        assertThat(requestAs(user, "GET", path, null).body()).isEqualTo(created.body());
+        assertThat(requestAs(receiver, "GET", path, null).body()).isEqualTo(created.body());
+        var foreign = requestAs(stranger, "GET", path, null);
+        var missing = requestAs(stranger, "GET", "/api/v1/transfers/" + UUID.randomUUID(), null);
+        error(foreign, 404, "TRANSFER_NOT_FOUND");
+        error(missing, 404, "TRANSFER_NOT_FOUND");
+        assertThat(body(foreign).path("message")).isEqualTo(body(missing).path("message"));
+        assertThat(balance(sender.source())).isEqualTo("400.0000");
+        assertThat(balance(recipient.destination())).isEqualTo("100.0000");
+    }
+
+    @Test
+    void foreignAndMissingSourceHaveIdenticalPublicErrorsAndDoNotReserveKeys() throws Exception {
+        Pair own = pair();
+        Pair foreign = pair();
+        String actor = identityToken(own.customer(), Set.of(AuthRole.USER));
+        long records = count("transfer_idempotency_records");
+        long journals = count("journal_transactions");
+        var denied = requestAs(actor, "POST", "/api/v1/transfers", transferBody(foreign, "1", "attempt"),
+                "Idempotency-Key", UUID.randomUUID().toString(), "X-User-Id", foreign.customer().toString());
+        var absent = requestAs(actor, "POST", "/api/v1/transfers", transferBody(foreign, "1", "attempt")
+                .replace(foreign.source().toString(), UUID.randomUUID().toString()), "Idempotency-Key", UUID.randomUUID().toString());
+        error(denied, 404, "ACCOUNT_NOT_FOUND");
+        error(absent, 404, "ACCOUNT_NOT_FOUND");
+        assertThat(body(denied).path("message")).isEqualTo(body(absent).path("message"));
+        assertThat(count("transfer_idempotency_records")).isEqualTo(records);
+        assertThat(count("journal_transactions")).isEqualTo(journals);
+    }
+
+    @Test
+    void adminWithoutUserCannotPostOrGetAndAdminWithUserHasNoOwnershipBypass() throws Exception {
+        Pair own = pair();
+        Pair other = pair();
+        String admin = identityToken(null, Set.of(AuthRole.ADMIN));
+        String both = identityToken(own.customer(), Set.of(AuthRole.ADMIN, AuthRole.USER));
+        String body = transferBody(other, "1", "attempt");
+        error(requestAs(admin, "POST", "/api/v1/transfers", body, "Idempotency-Key", UUID.randomUUID().toString()), 403, "FORBIDDEN");
+        error(requestAs(admin, "GET", "/api/v1/transfers/" + UUID.randomUUID(), null), 403, "FORBIDDEN");
+        error(requestAs(both, "POST", "/api/v1/transfers", body, "Idempotency-Key", UUID.randomUUID().toString()), 404, "ACCOUNT_NOT_FOUND");
+        fund(own.debit(), "10");
+        var result = requestAs(both, "POST", "/api/v1/transfers", transferBody(own, "1", "own"),
+                "Idempotency-Key", UUID.randomUUID().toString());
+        assertThat(result.statusCode()).isEqualTo(201);
+        String path = "/api/v1/transfers/" + body(result).path("id").asString();
+        error(requestAs(admin, "GET", path, null), 403, "FORBIDDEN");
+    }
+
+    @Test
+    void realJwtNamespacesPermitSameKeyAndCannotReturnAnotherUsersReplay() throws Exception {
+        Pair a = pair();
+        Pair b = pair();
+        String actorA = identityToken(a.customer(), Set.of(AuthRole.USER));
+        String actorB = identityToken(b.customer(), Set.of(AuthRole.USER));
+        fund(a.debit(), "10");
+        fund(b.debit(), "10");
+        String key = UUID.randomUUID().toString();
+        var first = requestAs(actorA, "POST", "/api/v1/transfers", transferBody(a, "1", "A"), "Idempotency-Key", key);
+        error(requestAs(actorB, "POST", "/api/v1/transfers", transferBody(a, "1", "A"), "Idempotency-Key", key), 404, "ACCOUNT_NOT_FOUND");
+        var second = requestAs(actorB, "POST", "/api/v1/transfers", transferBody(b, "1", "B"), "Idempotency-Key", key);
+        assertThat(first.statusCode()).isEqualTo(201);
+        assertThat(second.statusCode()).isEqualTo(201);
+        assertThat(body(first).path("id")).isNotEqualTo(body(second).path("id"));
+        assertThat(body(first).path("journalTransactionId")).isNotEqualTo(body(second).path("journalTransactionId"));
+        var replayA = requestAs(actorA, "POST", "/api/v1/transfers", transferBody(a, "1.00", "changed"), "Idempotency-Key", key);
+        var replayB = requestAs(actorB, "POST", "/api/v1/transfers", transferBody(b, "1.00", "changed"), "Idempotency-Key", key);
+        assertThat(replayA.body()).isEqualTo(first.body());
+        assertThat(replayB.body()).isEqualTo(second.body());
+        error(requestAs(actorA, "POST", "/api/v1/transfers", transferBody(a, "2", "A"), "Idempotency-Key", key), 409, "IDEMPOTENCY_CONFLICT");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM transfer_idempotency_records WHERE idempotency_key = ?", Integer.class, key)).isEqualTo(2);
     }
 
     private UUID customer() throws Exception {
@@ -564,7 +678,7 @@ class ApiHttpIntegrationTests {
                 HttpResponse.BodyHandlers.ofString());
         assertThat(ui.statusCode()).isEqualTo(200);
         assertThat(ui.body()).contains("Swagger UI");
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("8");
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("9");
         assertThat(flyway.info().pending()).isEmpty();
     }
 

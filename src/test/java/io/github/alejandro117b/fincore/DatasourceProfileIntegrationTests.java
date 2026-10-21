@@ -59,8 +59,11 @@ class DatasourceProfileIntegrationTests {
                 assertLocations(dev, true);
                 ids = dev.getBean(StarterDemoSeeder.class).seed();
                 assertThat(jdbc(dev).queryForObject("SELECT count(*) FROM demo_seed_runs", Integer.class)).isEqualTo(1);
-                dev.getBean(TransferService.class).execute(new TransferCommand(ids.alejandroAccountId(),
-                        ids.fernandoAccountId(), new BigDecimal("500.0000"), "MXN", "profile-demo-spend", "profile fixture"));
+                var actor = io.github.alejandro117b.fincore.security.TestActors.provision(ids.alejandroCustomerId(),
+                        dev.getBean(io.github.alejandro117b.fincore.auth.AuthUserProvisioningService.class),
+                        dev.getBean(io.github.alejandro117b.fincore.auth.AuthUserRepository.class));
+                io.github.alejandro117b.fincore.security.TestActors.call(actor, () -> dev.getBean(TransferService.class).execute(new TransferCommand(ids.alejandroAccountId(),
+                        ids.fernandoAccountId(), new BigDecimal("500.0000"), "MXN", "profile-demo-spend", "profile fixture")));
                 assertBalance(dev, ids.alejandroAccountId(), "1500.0000");
                 assertBalance(dev, ids.fernandoAccountId(), "500.0000");
                 before = snapshot(dev);
@@ -89,7 +92,7 @@ class DatasourceProfileIntegrationTests {
                         assertThat(normal.getBean(Flyway.class).info().pending()).isEmpty();
                         assertThat(jdbc(normal).queryForList("SELECT script FROM flyway_schema_history "
                                 + "WHERE version IS NOT NULL ORDER BY installed_rank", String.class))
-                                .hasSize(8).noneMatch(script -> script.contains("demo"));
+                                .hasSize(9).noneMatch(script -> script.contains("demo"));
                         assertThat(snapshot(dev)).isEqualTo(before);
                     } finally {
                         dropOnlyTheGeneratedSchema(normal, schema);

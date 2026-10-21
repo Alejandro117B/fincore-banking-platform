@@ -24,7 +24,7 @@ public class ApiConfiguration {
                 .type(SecurityScheme.Type.HTTP).scheme("bearer").bearerFormat("JWT"));
         return new OpenAPI().components(components).info(new Info().title("FinCore development API").version("v1")
                 .description("JWT authenticated API. Customer/Account reads enforce ownership; creation requires ADMIN. "
-                        + "Transfers currently require authentication only; ownership and identity-scoped idempotency are pending Phase 7B. "
+                        + "Transfers require USER, source ownership and identity-scoped idempotency; reads require participation. "
                         + "Money uses JSON strings. Customer/Account creation is not idempotent."));
     }
 
@@ -37,7 +37,7 @@ public class ApiConfiguration {
             addError(operation.getResponses(), "401", login ? "Invalid credentials." : "Missing, invalid, expired or revoked token.");
             if (!login) { addError(operation.getResponses(), "403", "The identity lacks the required role or route permission."); }
             if (path.startsWith("/api/v1/transfers")) {
-                operation.setDescription(operation.getDescription() + " Phase 7A: authenticated access only; ownership and identity-scoped idempotency are pending Phase 7B.");
+                operation.setDescription(operation.getDescription() + " Requires USER. POST requires current source ownership and scopes keys to AuthUser; GET requires current source or destination ownership. ADMIN has no bypass.");
             }
             addError(operation.getResponses(), "400", "Invalid request, JSON, UUID, header or pagination.");
             addError(operation.getResponses(), "500", "Unexpected technical failure; safe diagnostic only.");
@@ -50,7 +50,7 @@ public class ApiConfiguration {
                 addError(operation.getResponses(), "422", "Known input/domain rejection.");
             }
             if (path.equals("/api/v1/transfers") || path.endsWith("/balance") || path.endsWith("/transactions")) {
-                addError(operation.getResponses(), "409", "Business conflict, account not ready or idempotency conflict.");
+                addError(operation.getResponses(), "409", "Business conflict, account not ready, IDEMPOTENCY_CONFLICT or IDEMPOTENCY_KEY_UNAVAILABLE. Unavailable keys have a generic response.");
             }
             operation.getResponses().values().forEach(response -> {
                 response.addHeaderObject("X-Request-Id", new Header().description("Server-generated request correlation UUID.")

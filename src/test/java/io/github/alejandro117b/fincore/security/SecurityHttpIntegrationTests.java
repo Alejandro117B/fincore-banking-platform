@@ -350,13 +350,13 @@ class SecurityHttpIntegrationTests {
                     + "VALUES (?, 'Existing', 'Customer', 'legacy@example.test', now(), now(), 0)", customer);
             String before = jdbc.queryForObject("SELECT to_jsonb(c)::text FROM " + upgrade + ".customers c", String.class);
             var checksums = jdbc.queryForList("SELECT checksum FROM " + upgrade + ".flyway_schema_history WHERE version IS NOT NULL ORDER BY installed_rank", Integer.class);
-            Flyway.configure().dataSource(dataSource).schemas(upgrade).defaultSchema(upgrade).locations("classpath:db/migration").load().migrate();
+            Flyway.configure().dataSource(dataSource).schemas(upgrade).defaultSchema(upgrade).locations("classpath:db/migration").target("8").load().migrate();
             assertThat(jdbc.queryForObject("SELECT to_jsonb(c)::text FROM " + upgrade + ".customers c", String.class)).isEqualTo(before);
             assertThat(jdbc.queryForList("SELECT checksum FROM " + upgrade + ".flyway_schema_history WHERE version <> '8' ORDER BY installed_rank", Integer.class)).isEqualTo(checksums);
             assertThat(jdbc.queryForObject("SELECT count(*) FROM " + upgrade + ".auth_users", Integer.class)).isZero();
             assertThat(jdbc.queryForObject("SELECT count(*) FROM " + upgrade + ".auth_user_roles", Integer.class)).isZero();
         } finally { jdbc.execute("DROP SCHEMA " + upgrade + " CASCADE"); }
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("8");
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("9");
     }
 
     @AfterAll

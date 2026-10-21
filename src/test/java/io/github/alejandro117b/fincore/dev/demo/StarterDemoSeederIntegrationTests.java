@@ -85,6 +85,13 @@ class StarterDemoSeederIntegrationTests {
     @Autowired private Flyway flyway;
     @PersistenceContext private EntityManager em;
 
+    private io.github.alejandro117b.fincore.transfer.TransferResult executeDemoTransfer(TransferCommand command) {
+        demoUsers.seed(seeder.seed());
+        UUID customer = jdbc.queryForObject("SELECT customer_id FROM accounts WHERE id = ?", UUID.class, command.sourceAccountId());
+        var actor = io.github.alejandro117b.fincore.security.TestActors.provision(customer, provisioning, authUsers);
+        return io.github.alejandro117b.fincore.security.TestActors.call(actor, () -> transfers.execute(command));
+    }
+
     @BeforeEach
     void recreateOnlyTheGeneratedSchema() {
         if (startupIds == null) {
@@ -107,7 +114,7 @@ class StarterDemoSeederIntegrationTests {
                 .containsExactlyInAnyOrder("classpath:db/migration", "classpath:db/dev-migration");
         assertThat(flyway.info().pending()).isEmpty();
         assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history WHERE version IS NOT NULL ORDER BY installed_rank",
-                String.class)).containsExactly("1", "2", "3", "4", "5", "6", "7", "8");
+                String.class)).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9");
         assertThat(jdbc.queryForObject("SELECT count(*) FROM flyway_schema_history WHERE script = 'R__create_demo_seed_runs.sql' AND success",
                 Integer.class)).isEqualTo(1);
     }
@@ -140,7 +147,7 @@ class StarterDemoSeederIntegrationTests {
         var ids = seeder.seed();
         var users = demoUsers.seed(ids);
         String hash = authUsers.findById(users.alejandroUserId()).orElseThrow().getPasswordHash();
-        transfers.execute(new TransferCommand(ids.alejandroAccountId(), ids.fernandoAccountId(),
+        executeDemoTransfer(new TransferCommand(ids.alejandroAccountId(), ids.fernandoAccountId(),
                 new BigDecimal("500.0000"), "MXN", "auth-demo-spend", null));
         runner.run(new org.springframework.boot.DefaultApplicationArguments());
         assertThat(demoUsers.seed(ids)).isEqualTo(users);
@@ -245,7 +252,7 @@ class StarterDemoSeederIntegrationTests {
     @Test
     void restartingAfterSpendingNeverReplenishesFunds() {
         var first = seeder.seed();
-        transfers.execute(new TransferCommand(first.alejandroAccountId(), first.fernandoAccountId(),
+        executeDemoTransfer(new TransferCommand(first.alejandroAccountId(), first.fernandoAccountId(),
                 new BigDecimal("500.0000"), "MXN", "demo-spend", "demo transfer"));
         assertThat(seeder.seed()).isEqualTo(first);
         assertScenarioCounts(2, 4);
